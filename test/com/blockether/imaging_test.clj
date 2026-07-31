@@ -34,7 +34,7 @@
 
 (deftest blank-info-and-pixels
   (with-open [im (img/blank 8 4 :blue)]
-    (is (= {:width 8 :height 4 :is-opaque true} (img/info im)))
+    (is (= {:width 8 :height 4 :is-opaque true :is-grayscale false} (img/info im)))
     (is (= 8 (img/width im)))
     (is (= 4 (img/height im)))
     (is (= (* 8 4 4) (alength (img/pixels im))))
@@ -57,6 +57,62 @@
     (is (= 16 (:width p)))
     (is (= 12 (:height p)))
     (is (false? (:is-animated p)))))
+
+(defn- be32 ^bytes [n]
+  (byte-array (map unchecked-byte [(bit-shift-right n 24) (bit-shift-right n 16)
+                                   (bit-shift-right n 8) n])))
+
+(defn- write-chunk! [^java.io.ByteArrayOutputStream out ^String typ ^bytes data]
+  (let [t (.getBytes typ "US-ASCII")
+        crc (doto (java.util.zip.CRC32.) (.update t) (.update data))]
+    (.write out (be32 (alength data)) 0 4)
+    (.write out t 0 4)
+    (.write out data 0 (alength data))
+    (.write out (be32 (unchecked-int (.getValue crc))) 0 4)))
+
+(defn- gray-png
+  "A minimal all-black GRAYSCALE PNG (colour type 0) at `depth` bits. Written by
+   hand because the library only ever ENCODES rgba8 — reading this colour type
+   back out of a foreign file is the whole point of the colour keys."
+  ^bytes [w h depth]
+  (let [raw (byte-array (* h (inc (* w (quot depth 8)))))  ; filter 0 + zero samples
+        idat (let [d (doto (java.util.zip.Deflater.) (.setInput raw) (.finish))
+                   bos (java.io.ByteArrayOutputStream.)
+                   buf (byte-array 4096)]
+               (while (not (.finished d))
+                 (.write bos buf 0 (.deflate d buf)))
+               (.end d)
+               (.toByteArray bos))
+        ihdr (byte-array (map unchecked-byte (concat (be32 w) (be32 h) [depth 0 0 0 0])))
+        out (java.io.ByteArrayOutputStream.)]
+    (.write out (byte-array (map unchecked-byte [0x89 0x50 0x4e 0x47 0x0d 0x0a 0x1a 0x0a])) 0 8)
+    (write-chunk! out "IHDR" ihdr)
+    (write-chunk! out "IDAT" idat)
+    (write-chunk! out "IEND" (byte-array 0))
+    (.toByteArray out)))
+
+(defn- colour-of [p] [(:color p) (:channels p) (:bits p) (:is-grayscale p) (:has-alpha p)])
+
+(deftest probe-reports-source-colour-type
+  (testing "grayscale sources, which a decoded RGBA8 handle can no longer name"
+    (is (= ["l8" 1 8 true false] (colour-of (img/probe (gray-png 8 6 8)))))
+    (is (= ["l16" 1 16 true false] (colour-of (img/probe (gray-png 8 6 16))))))
+  (testing "the library's own PNG output is rgba8, a JPEG rgb8"
+    (is (= ["rgba8" 4 8 false true] (colour-of (img/probe (png-bytes)))))
+    (is (= ["rgb8" 3 8 false false]
+           (colour-of (img/probe (with-open [im (img/blank 8 6 :red)] (img/encode im :jpeg)))))))
+  (testing "a vector document has no stored colour type: it rasterises to rgba8"
+    (let [p (img/probe (.getBytes "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='2'/>"
+                                  "UTF-8"))]
+      (is (= "svg" (:format p)))
+      (is (= ["rgba8" 4 8 false true] (colour-of p))))))
+
+(deftest info-reports-grayscale-pixels
+  (testing "info answers from the PIXELS, so a grey fill is grayscale whatever it came from"
+    (with-open [im (img/blank 4 4 "#404040")]
+      (is (true? (:is-grayscale (img/info im)))))
+    (with-open [im (img/blank 4 4 :red)]
+      (is (false? (:is-grayscale (img/info im)))))))
 
 (deftest transforms
   (with-open [im (img/blank 40 20 :green)]

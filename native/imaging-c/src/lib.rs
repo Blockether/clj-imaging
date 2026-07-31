@@ -188,8 +188,10 @@ pub unsafe extern "C" fn imaging_image_free(p: *mut Image) {
 // decode / encode / probe
 // ---------------------------------------------------------------------------
 
-/// Identify encoded bytes without fully decoding: JSON
-/// `{"format","width","height","is_animated","frames"}`.
+/// Identify encoded bytes without fully decoding: JSON `{"format","width",
+/// "height","bytes","is_animated","frames","color","channels","bits",
+/// "is_grayscale","has_alpha"}`. The colour fields describe the SOURCE file;
+/// a decoded handle is always RGBA8.
 ///
 /// # Safety
 /// `data`/`len` must describe a readable byte range.
@@ -199,10 +201,14 @@ pub unsafe extern "C" fn imaging_probe(data: *const u8, len: u64) -> *mut c_char
         let d = unsafe { bytes(data, len) }?;
         if svg::looks_like_svg(d) {
             let img = svg::render(d, &serde_json::Value::Null)?;
-            return Ok(serde_json::json!({
+            let mut v = serde_json::json!({
                 "format": "svg", "width": img.width(), "height": img.height(),
-                "is_animated": false, "frames": 1
-            }));
+                "bytes": d.len(), "is_animated": false, "frames": 1
+            });
+            // A vector document has no stored colour type: it rasterises into
+            // the same straight RGBA8 everything else decodes to.
+            imgops::merge_color(&mut v, image::ColorType::Rgba8);
+            return Ok(v);
         }
         imgops::probe(d)
     }))
@@ -255,7 +261,9 @@ pub unsafe extern "C" fn imaging_pixels(p: *mut Image) -> *mut Buf {
     buf_out(guard(|| Ok(unsafe { image(p) }?.buf.as_raw().clone())))
 }
 
-/// `{"width","height","is_opaque"}`.
+/// `{"width","height","is_opaque","is_grayscale"}` — facts read off the RGBA8
+/// pixels, not off whatever file the handle was decoded from (ask `probe` for
+/// the source's colour type).
 ///
 /// # Safety
 /// `p` must be a live image handle.
@@ -264,7 +272,8 @@ pub unsafe extern "C" fn imaging_info(p: *mut Image) -> *mut c_char {
     json_out(guard(|| {
         let img = unsafe { image(p) }?;
         Ok(serde_json::json!({
-            "width": img.width(), "height": img.height(), "is_opaque": img.is_opaque()
+            "width": img.width(), "height": img.height(),
+            "is_opaque": img.is_opaque(), "is_grayscale": img.is_grayscale()
         }))
     }))
 }

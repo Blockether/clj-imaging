@@ -4,7 +4,7 @@
 use std::io::Cursor;
 
 use image::imageops::FilterType;
-use image::{DynamicImage, ImageFormat, RgbaImage};
+use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat, RgbaImage};
 use resvg::tiny_skia;
 
 use crate::util::{R, Rgba, err, from_pixmap, to_pixmap};
@@ -52,6 +52,17 @@ impl Image {
     pub fn is_opaque(&self) -> bool {
         self.buf.pixels().all(|p| p.0[3] == 255)
     }
+
+    /// True when every pixel has r == g == b, i.e. the RGBA buffer carries no
+    /// colour and could be stored as one channel. Answered from the PIXELS
+    /// (the handle no longer remembers what it was decoded from), so it is a
+    /// fact about the image, not about the file it came from — use `probe` for
+    /// the source's own colour type.
+    pub fn is_grayscale(&self) -> bool {
+        self.buf
+            .pixels()
+            .all(|p| p.0[0] == p.0[1] && p.0[1] == p.0[2])
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -65,8 +76,11 @@ pub fn decode(data: &[u8]) -> R<Image> {
     })
 }
 
-/// Format + geometry WITHOUT decoding pixels — the cheap question ("is this a
-/// 40 MP TIFF?") answered before committing memory to it.
+/// Format, geometry and COLOUR TYPE without decoding pixels — the cheap
+/// question ("is this a 40 MP TIFF?", "is this file grayscale?") answered
+/// before committing memory to it. The colour fields describe the SOURCE, which
+/// a decoded handle can no longer tell you: `decode` normalises everything to
+/// RGBA8.
 pub fn probe(data: &[u8]) -> R<serde_json::Value> {
     let reader = image::ImageReader::new(Cursor::new(data))
         .with_guessed_format()
@@ -76,18 +90,59 @@ pub fn probe(data: &[u8]) -> R<serde_json::Value> {
         .map(format_name)
         .unwrap_or("unknown")
         .to_string();
-    let (width, height) = reader
-        .into_dimensions()
+    let decoder = reader
+        .into_decoder()
         .map_err(|e| format!("probe failed: {e}"))?;
+    let (width, height) = decoder.dimensions();
+    let color = decoder.color_type();
     let (is_animated, frames) = animation(data, &format);
-    Ok(serde_json::json!({
+    let mut v = serde_json::json!({
         "format": format,
         "width": width,
         "height": height,
         "bytes": data.len(),
         "is_animated": is_animated,
         "frames": frames,
-    }))
+    });
+    merge_color(&mut v, color);
+    Ok(v)
+}
+
+/// Add the `color`/`channels`/`bits`/`is_grayscale`/`has_alpha` view of a
+/// colour type to a JSON object. One place, so `probe` and the SVG branch in
+/// `lib.rs` can never drift apart.
+pub fn merge_color(v: &mut serde_json::Value, c: ColorType) {
+    let channels = u32::from(c.channel_count());
+    if let Some(o) = v.as_object_mut() {
+        o.insert("color".into(), color_name(c).into());
+        o.insert("channels".into(), channels.into());
+        o.insert(
+            "bits".into(),
+            (u32::from(c.bits_per_pixel()) / channels).into(),
+        );
+        o.insert("is_grayscale".into(), (!c.has_color()).into());
+        o.insert("has_alpha".into(), c.has_alpha().into());
+    }
+}
+
+/// The colour type a decoder would hand us, named the way the pixel layout
+/// reads: channels then bit depth. Indexed/palette sources report the type
+/// they expand into (`rgb8`/`rgba8`), because that is what any caller will
+/// actually receive.
+pub fn color_name(c: ColorType) -> &'static str {
+    match c {
+        ColorType::L8 => "l8",
+        ColorType::La8 => "la8",
+        ColorType::Rgb8 => "rgb8",
+        ColorType::Rgba8 => "rgba8",
+        ColorType::L16 => "l16",
+        ColorType::La16 => "la16",
+        ColorType::Rgb16 => "rgb16",
+        ColorType::Rgba16 => "rgba16",
+        ColorType::Rgb32F => "rgb32f",
+        ColorType::Rgba32F => "rgba32f",
+        _ => "rgba8",
+    }
 }
 
 /// Animation facts read from the CONTAINER, never by decoding frames: APNG's

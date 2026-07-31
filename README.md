@@ -41,7 +41,9 @@ Requires JDK 22+ (FFM). Run with `--enable-native-access=ALL-UNNAMED` to silence
       (img/adjust {:brightness 4 :contrast 8})
       (img/save! "out.webp")))
 
-(img/probe bytes)                  ;; => {:format "png" :width 1200 :height 800 :frames 1 ...}
+(img/probe bytes)                  ;; => {:format "png" :width 1200 :height 800 :frames 1
+                                   ;;     :color "l8" :channels 1 :bits 8 :is-grayscale true ...}
+                                   ;; the colour keys describe the SOURCE; a decoded Img is RGBA8
 (img/convert bytes {:format "webp" :max-width 1600 :max-bytes 200000})  ;; => byte[]
 (img/resize im 400 300)            ;; exact size    (img/thumbnail im 256 256) fits a box
 

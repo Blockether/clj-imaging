@@ -295,8 +295,13 @@
 
 (defn probe
   "Identify encoded bytes without a full decode:
-   `{:format :width :height :is-animated :frames}`. SVG documents report
-   `:format \"svg\"`."
+   `{:format :width :height :bytes :is-animated :frames :color :channels :bits
+   :is-grayscale :has-alpha}`. The colour keys describe the SOURCE file — a
+   decoded `Img` is always RGBA8, so this is the only way to learn that a PNG
+   was 8-bit grayscale (`:color \"l8\"`) or 16-bit. `:color` is one of `\"l8\"`
+   `\"la8\"` `\"rgb8\"` `\"rgba8\"` `\"l16\"` `\"la16\"` `\"rgb16\"` `\"rgba16\"`
+   `\"rgb32f\"` `\"rgba32f\"`; indexed/palette sources report what they expand
+   into. SVG documents report `:format \"svg\"` and rasterise as `\"rgba8\"`."
   [data]
   (with-open [arena (Arena/ofConfined)]
     (let [^bytes b (->bytes data)]
@@ -328,7 +333,9 @@
   ^bytes [img] (take-bytes! (invoke :pixels (seg img)) :pixels))
 
 (defn info
-  "`{:width :height :is-opaque}`."
+  "`{:width :height :is-opaque :is-grayscale}` — read off the handle's own RGBA8
+   pixels (`:is-grayscale` = every pixel has r = g = b), not off the file it came
+   from; `probe` answers that one."
   [img] (or (some-> (take-string! (invoke :info (seg img))) json->) (fail! :info)))
 
 (defn width ^long [img] (long (:width (info img))))
