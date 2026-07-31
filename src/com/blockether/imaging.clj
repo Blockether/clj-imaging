@@ -180,7 +180,12 @@
 ;; Image handle
 ;; ---------------------------------------------------------------------------
 
-(def ^:private ^Cleaner cleaner (Cleaner/create))
+;; LAZY on purpose: a `Cleaner` spawns a daemon thread at construction, and a
+;; native-image build that initializes this namespace at BUILD time would drag
+;; that live Cleaner into the image heap — GraalVM fails the build outright
+;; ("Detected a java.lang.ref.Cleaner object in the image heap"). Behind a delay
+;; the thread is created on the first handle instead, at run time.
+(def ^:private cleaner (delay (Cleaner/create)))
 
 (defn- free-image! [^MemorySegment p]
   (when-not (null? p) (invoke :image-free p)))
@@ -208,7 +213,7 @@
     ;; Belt and braces: `with-open`/`close` is the intended lifecycle, but a
     ;; dropped handle must not leak the Rust allocation for the whole process.
     ;; The action must NOT capture `i` (that would keep it reachable forever).
-    (.register cleaner i (reify Runnable
+    (.register ^Cleaner @cleaner i (reify Runnable
                            (run [_]
                              (when (.compareAndSet freed false true)
                                (free-image! p)))))
@@ -361,7 +366,7 @@
   ([img file] (save! img file nil))
   ([img file {:keys [format quality] :as _opts}]
    (let [f   (io/file file)
-         ext (str/lower-case (or format (last (str/split (.getName f) #"\.")) "png"))]
+         ext (str/lower-case (or (some-> format name) (last (str/split (.getName f) #"\.")) "png"))]
      (io/copy (encode img (keyword ext) quality) f)
      f)))
 
