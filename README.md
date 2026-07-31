@@ -20,9 +20,9 @@ decoding, drawing, text, SVG and charts all work in a native binary with nothing
 
 ```clojure
 ;; deps.edn
-com.blockether/imaging {:mvn/version "0.1.0"}
+com.blockether/imaging {:mvn/version "0.1.1"}
 ;; plus the native library for your platform
-com.blockether/imaging-native-darwin-arm64 {:mvn/version "0.1.0"}
+com.blockether/imaging-native-darwin-arm64 {:mvn/version "0.1.1"}
 ```
 
 Native artifacts are published per platform: `darwin-arm64`, `darwin-x64`,
