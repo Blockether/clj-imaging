@@ -1,0 +1,36 @@
+;; clj-imaging — imaging WITHOUT java.desktop: decode/encode, transforms, vector
+;; drawing, text, SVG rasterisation and plotting, in-process via the JDK Foreign
+;; Function & Memory API over a first-party Rust cdylib (native/imaging-c: the
+;; `image` crate + resvg/usvg/tiny-skia). No AWT, no ImageIO, no JNI, no
+;; subprocess — so a GraalVM native image never pulls in sun.java2d.
+;;
+;; The cdylib is resolved at runtime from IMAGING_NATIVE_PATH, a bundled
+;; classpath resource (com.blockether/imaging-native-<platform>), or — as a
+;; fallback — the matching native jar resolved through clojure.tools.deps IF it
+;; is on the caller's classpath.
+;;
+;; org.clojure/data.json is the ONE runtime dep: the cdylib's structured
+;; arguments and results (draw ops, plot specs, image info) are JSON. It is pure
+;; Clojure and native-image clean. `org.clojure/tools.deps` is deliberately NOT
+;; declared: it drags in a large tree that breaks native-image and is only needed
+;; for the optional auto-download fallback (add it yourself, or use `:download`).
+{:paths ["src" "resources"]
+
+ :deps {org.clojure/data.json {:mvn/version "2.5.1"}}
+
+ :aliases
+ {:download {:deps {org.clojure/tools.deps {:mvn/version "0.31.1629"}}}
+
+  :build
+  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.9"}
+          slipset/deps-deploy           {:mvn/version "0.2.5"}}
+   :ns-default build}
+
+  :test
+  {:extra-paths ["test"]
+   :extra-deps  {io.github.cognitect-labs/test-runner
+                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+   :main-opts   ["-m" "cognitect.test-runner"]
+   :exec-fn     cognitect.test-runner.api/test
+   ;; FFM native calls are a restricted operation; opt in so tests don't warn.
+   :jvm-opts    ["--enable-native-access=ALL-UNNAMED"]}}}

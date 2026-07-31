@@ -1,0 +1,7 @@
+target/
+.cpcache/
+.clj-kondo/.cache/
+.lsp/
+resources/prebuilds/
+native/imaging-c/target/
+.DS_Store
