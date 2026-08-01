@@ -34,5 +34,14 @@ fi
 
 DEST="$HERE/resources/prebuilds/$PLATFORM"
 mkdir -p "$DEST"
+# Overwriting the dylib IN PLACE poisons macOS's per-vnode code-signature cache:
+# the kernel keeps the old signature for that inode, sees `cs_mtime != mtime` on
+# the next mmap and SIGKILLs the JVM at load — exit 137, no stack, no hs_err, no
+# clue. Replacing the file (new inode) and re-signing ad-hoc keeps the staged
+# library loadable right after a rebuild.
+rm -f "$DEST/$LIB"
 cp "$OUT" "$DEST/$LIB"
+if [ "$(uname -s)" = "Darwin" ]; then
+  codesign --force --sign - "$DEST/$LIB" >/dev/null 2>&1 || true
+fi
 echo "staged $DEST/$LIB"

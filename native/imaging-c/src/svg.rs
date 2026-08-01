@@ -261,7 +261,12 @@ pub fn canvas(data: &[u8], opts: &Value) -> R<Canvas> {
         (Some((w, h)), _) => (w, h, "view_box", None),
         (None, Some(b)) => {
             let (w, h) = fit_canvas(b[2], b[3], min_dim, max_dim);
-            (w, h, "content", Some(device_margin(b, w, h, DEVICE_MARGIN_PX)))
+            (
+                w,
+                h,
+                "content",
+                Some(device_margin(b, w, h, DEVICE_MARGIN_PX)),
+            )
         }
         (None, None) => (DEFAULT_CANVAS.0, DEFAULT_CANVAS.1, "default", None),
     };
@@ -540,10 +545,7 @@ fn ink_extent(
         &[
             ("width".to_string(), side.to_string()),
             ("height".to_string(), side.to_string()),
-            (
-                "viewBox".to_string(),
-                format!("{vx} {vy} {span} {span}"),
-            ),
+            ("viewBox".to_string(), format!("{vx} {vy} {span} {span}")),
         ],
     );
     let tree = usvg::Tree::from_data(probe.as_bytes(), o).ok()?;

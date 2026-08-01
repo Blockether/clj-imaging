@@ -38,6 +38,16 @@ quick-xml = "0.41"
 # the tree through `zip`, and pinned to the same zlib-rs backend so there is only
 # one deflate implementation in the cdylib.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# Video. Both are pure Rust with no system codec and no build script: `re_mp4`
+# demuxes ISO-BMFF (it is rerun's maintained fork of the `mp4` crate) and
+# `rust_h264` decodes H.264/AVC Baseline/Main/High, CAVLC + CABAC, B-frames.
+# That keeps the "links against nothing" property that lets this cdylib ship
+# inside a GraalVM native image.
+re_mp4 = "0.5"
+# `rust_h264` is vendored under ../vendor with one fix: 0.4.0 orders the P-slice
+# reference list by POC, which silently corrupts every stream that has more than
+# one reference frame and runs past the frame_num wrap. See ../vendor/PATCHES.md.
+rust_h264 = { path = "../vendor/rust_h264", version = "0.4" }
 
 [profile.release]
 lto = true

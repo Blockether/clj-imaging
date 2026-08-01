@@ -4,7 +4,8 @@ Images, SVG rasterization and plotting for Clojure — **without `java.desktop`*
 
 `com.blockether/imaging` is a thin Clojure FFM (Java 22+ `java.lang.foreign`) binding over a
 small Rust cdylib built on [`image`](https://crates.io/crates/image),
-[`resvg`/`usvg`](https://crates.io/crates/resvg) and [`tiny-skia`](https://crates.io/crates/tiny-skia).
+[`resvg`/`usvg`](https://crates.io/crates/resvg), [`tiny-skia`](https://crates.io/crates/tiny-skia),
+[`re_mp4`](https://crates.io/crates/re_mp4) and [`rust_h264`](https://crates.io/crates/rust_h264).
 
 Why: AWT / Java2D / ImageIO drag the whole `java.desktop` module and its JNI surface into a
 GraalVM native image. This library replaces that with one self-contained native library, so
@@ -14,6 +15,7 @@ decoding, drawing, text, SVG and charts all work in a native binary with nothing
 * SVG → raster via resvg, with the same font stack
 * Four Noto faces embedded (sans, sans-bold, sans-italic, mono) — no system fonts required
 * A declarative plotting DSL (lines, areas, steps, bars, hbars, stacked bars, scatter, histogram, pie, donut, heatmap)
+* **MP4 video**: demux + H.264 decode to frames, or transcode straight to an animated GIF — no `ffmpeg`, no system codec
 * No AWT, no ImageIO, no `BufferedImage`, no service loaders
 
 ## Install
@@ -60,6 +62,31 @@ Requires JDK 22+ (FFM). Run with `--enable-native-access=ALL-UNNAMED` to silence
 
 Every op is a map with `:op`; batch style keys (`:fill` `:stroke` `:stroke-width` `:size`
 `:family` `:weight` `:italic`) can be set per batch or per op. WebP encoding is lossless.
+
+### Video (MP4 / H.264)
+
+```clojure
+(img/mp4? "clip.mp4")                                   ;; => true (ftyp sniff)
+(img/probe-video "clip.mp4")
+;; => {:format "mp4" :codec "avc1.640028" :codec-kind "h264" :is-decodable true
+;;     :width 1920 :height 1080 :frames 300 :duration-s 10.0 :fps 30.0 :has-audio true}
+
+;; Frames, bounded — every frame is a full uncompressed canvas.
+(img/decode-video "clip.mp4" {:max-frames 30 :stride 2 :max-dimension 640})
+;; => {:width 640 :height 360 :fps 30.0 :frame-count 30 :total-frames 300
+;;     :frames [{:index 0 :timestamp-s 0.0 :data #bytes} ...]}   ; :data = straight RGBA8
+
+;; ...or PNG/JPEG stills instead of raw rows:
+(img/decode-video "clip.mp4" {:encoding "png" :max-frames 1})
+
+;; Whole clip → one animated GIF, without the frames ever crossing the FFI:
+(img/video->gif "clip.mp4" {:max-dimension 480 :stride 2})   ;; => byte[]
+```
+
+Frames come back in **display** order (B-frames reordered), display-cropped (H.264 codes
+1080p as 1920×1088) and as straight RGBA8, so they drop into `from-pixels` unchanged.
+H.264 Baseline/Main/High decode; HEVC, AV1 and VP9 are demuxed but report
+`:is-decodable false` instead of a corrupt picture.
 
 ### Plotting
 

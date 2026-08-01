@@ -178,7 +178,11 @@ fn jpeg_strip(data: &[u8], strip: bool) -> R<Vec<u8>> {
             break;
         }
     }
-    if out.len() >= 4 { Ok(out) } else { Ok(data.to_vec()) }
+    if out.len() >= 4 {
+        Ok(out)
+    } else {
+        Ok(data.to_vec())
+    }
 }
 
 /// The scale that fits an image inside `max_width` x `max_height`. Never

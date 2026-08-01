@@ -679,3 +679,142 @@
       (with-open [im (img/decode (img/optimize png {:format :jpeg :quality 75}))]
         (is (= [320 240] [(img/width im) (img/height im)])))
       (is (= "jpeg" (:format (img/probe (img/optimize png {:format :jpeg :quality 75}))))))))
+
+;; ---------------------------------------------------------------------------
+;; Video (MP4 / H.264)
+;;
+;; `test/fixtures/bars.mp4` is a real H.264 clip: 64x48, 10 frames at 8 fps,
+;; each frame an 8px-wide white bar in block `index mod 8` on black. That makes
+;; the bar's position a CONTENT check and an ORDER check at once — a decoder
+;; that reuses one buffer, drops B-frames or emits coded order fails it.
+;; ---------------------------------------------------------------------------
+
+(defn- clip
+  ^java.io.File [] (io/file "test/fixtures/bars.mp4"))
+
+(defn- brightest-block
+  "Index of the 8px column block holding the white bar."
+  [^bytes rgba w h]
+  (apply max-key
+         (fn [b]
+           (reduce + (for [y (range h)
+                           x (range (* b 8) (* (inc b) 8))]
+                       (bit-and (aget rgba (* 4 (+ (* y w) x))) 0xff))))
+         (range (quot w 8))))
+
+(deftest mp4-sniffing
+  (is (img/mp4? (clip)))
+  (is (not (img/mp4? (png-bytes))))
+  (is (not (img/mp4? (byte-array 3)))))
+
+(deftest probe-video-without-decoding
+  (let [p (img/probe-video (clip))]
+    (is (= "mp4" (:format p)))
+    (is (= "h264" (:codec-kind p)))
+    (is (str/starts-with? (:codec p) "avc1."))
+    (is (true? (:is-decodable p)))
+    (is (= [64 48] [(:width p) (:height p)]))
+    (is (= 10 (:frames p)))
+    (is (false? (:has-audio p)))
+    (is (== 8.0 (:fps p)))
+    (is (== 1.25 (:duration-s p)))))
+
+(deftest decode-video-frames-are-rgba-in-display-order
+  (let [d (img/decode-video (clip))
+        {:keys [width height frames frame-count]} d]
+    (is (= "mp4" (:format d)))
+    (is (= "rgba" (:encoding d)))
+    (is (= [64 48] [width height]))
+    (is (= [64 48] [(:source-width d) (:source-height d)]))
+    (is (= 10 frame-count (:total-frames d) (count frames)))
+    (testing "straight RGBA8 rows, one buffer per frame — not N views of the last"
+      (is (every? #(= (* width height 4) (alength ^bytes (:data %))) frames))
+      (testing "no two neighbours share bytes — the decoder does not hand back
+               N views of one reused Picture buffer (the bar repeats every 8
+               frames, so only 8 of the 10 payloads are globally distinct)"
+        (is (every? (fn [[a b]] (not= (seq (:data a)) (seq (:data b))))
+                    (partition 2 1 frames)))
+        (is (= 8 (count (distinct (map #(seq (:data %)) frames)))))))
+    (testing "timestamps and the moving bar both prove display order"
+      (is (= (range 10) (map :index frames)))
+      (is (= (map #(/ % 8.0) (range 10)) (map :timestamp-s frames)))
+      (is (= [0 1 2 3 4 5 6 7 0 1]
+             (map #(brightest-block (:data %) width height) frames))))
+    (testing "a frame's rows load straight back into an Img"
+      (with-open [im (img/from-pixels (:data (first frames)) width height)]
+        (is (= {:width 64 :height 48 :is-opaque true :is-grayscale true}
+               (img/info im)))))))
+
+;; `test/fixtures/refcycle27.mp4` is lossless (`-qp 0`) H.264, 27 frames of three
+;; distinct noise images cycled A,B,C,A,B,C…, encoded `-refs 3 -bf 0 weightp=0`
+;; in one GOP. Noise is expensive to intra-code, so the encoder predicts from the
+;; matching picture three frames back — through `ref_idx_l0 > 0`. Lossless plus
+;; cyclic means frame `i` must return byte-identical to frame `i mod 3`, an
+;; invariant that needs no reference decoder to check. Past picture 16 `frame_num`
+;; wraps, and ordering the reference list by the bitstream's picture order count
+;; (which wraps with it when `pic_order_cnt_type` is 2) puts the OLDEST reference
+;; at index 0 — every later frame then predicts from the wrong picture and drifts.
+;; ---------------------------------------------------------------------------
+
+(defn- refcycle
+  ^java.io.File [] (io/file "test/fixtures/refcycle27.mp4"))
+
+(deftest decode-video-picks-the-right-reference-past-the-frame-num-wrap
+  (let [{:keys [frames frame-count]} (img/decode-video (refcycle))
+        payloads (mapv #(seq (:data %)) frames)]
+    (is (= 27 frame-count (count frames)))
+    (testing "the three cycle members really differ, or the check is vacuous"
+      (is (= 3 (count (distinct payloads)))))
+    (testing "every frame is byte-identical to its cycle member"
+      (is (= (mapv #(payloads (mod % 3)) (range 27)) payloads)))))
+
+(deftest decode-video-bounds-the-work
+  (let [d (img/decode-video (clip) {:max-frames 3 :stride 2 :max-dimension 32})]
+    (is (= 3 (:frame-count d)))
+    (is (= 10 (:total-frames d)))
+    (is (= [0 2 4] (map :index (:frames d))))
+    (testing "scaled down, aspect kept, and the payload follows the new size"
+      (is (= [32 24] [(:width d) (:height d)]))
+      (is (= [64 48] [(:source-width d) (:source-height d)]))
+      (is (every? #(= (* 32 24 4) (alength ^bytes (:data %))) (:frames d))))))
+
+(deftest decode-video-can-emit-encoded-stills
+  (let [d (img/decode-video (clip) {:encoding "png" :max-frames 2})]
+    (is (= "png" (:encoding d)))
+    (is (= 2 (:frame-count d)))
+    (doseq [f (:frames d)]
+      (is (= {:format "png" :width 64 :height 48}
+             (select-keys (img/probe (:data f)) [:format :width :height]))))))
+
+(deftest video-to-gif-is-watchable-anywhere
+  (let [gif (img/video->gif (clip))]
+    (is (= "GIF89a" (String. (byte-array (take 6 gif)) "US-ASCII")))
+    (is (= "gif" (:format (img/probe gif))))
+    (is (true? (:is-animated (img/probe gif))))
+    (let [back (img/decode-gif gif)]
+      (is (= [64 48] [(:width back) (:height back)]))
+      (is (= 10 (count (:frames back))))
+      (is (= -1 (:loop-count back)))
+      (testing "8 fps is 125 ms, quantised to GIF's centisecond delay field"
+        (is (= 120 (:delay-ms (first (:frames back))))))
+      (testing "the bar still marches — the transcode kept display order"
+        (is (= [0 1 2 3 4 5 6 7 0 1]
+               (map #(brightest-block (:rgba %) 64 48) (:frames back)))))))
+  (testing "options thin and retime the animation"
+    (let [back (img/decode-gif (img/video->gif (clip) {:stride 2 :max-dimension 32
+                                                       :fps 10 :loop-count 3}))]
+      (is (= [32 24] [(:width back) (:height back)]))
+      (is (= 5 (count (:frames back))))
+      (is (= 3 (:loop-count back)))
+      (is (= 100 (:delay-ms (first (:frames back))))))))
+
+(deftest video-errors-are-ex-info
+  (testing "a still image is not a container"
+    (is (thrown? clojure.lang.ExceptionInfo (img/probe-video (png-bytes))))
+    (is (thrown? clojure.lang.ExceptionInfo (img/decode-video (png-bytes))))
+    (is (thrown? clojure.lang.ExceptionInfo (img/video->gif (png-bytes)))))
+  (testing "the failure names the operation and carries the native message"
+    (let [e (try (img/probe-video (png-bytes)) (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :probe-video (:op (ex-data e))))
+      (is (string? (ex-message e)))
+      (is (not (str/blank? (ex-message e)))))))

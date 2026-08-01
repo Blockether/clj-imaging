@@ -58,7 +58,6 @@
    The version comes from the NAMESPACED `imaging/VERSION` resource."
   (nr/spec {:lib "imaging"}))
 
-
 (defonce ^:private handles
   (delay
     (nr/bind! native-spec
@@ -78,6 +77,9 @@
                :encode        [:ptr "imaging_encode" :ptr :ptr :i32]
                :decode-gif    [:ptr "imaging_decode_gif" :ptr :i64]
                :encode-gif    [:ptr "imaging_encode_gif" :ptr]
+               :probe-video   [:ptr "imaging_probe_video" :ptr :i64]
+               :decode-video  [:ptr "imaging_decode_video" :ptr :i64 :ptr]
+               :video->gif    [:ptr "imaging_video_to_gif" :ptr :i64 :ptr]
                :convert       [:ptr "imaging_convert" :ptr :i64 :ptr]
                :resize        [:ptr "imaging_resize" :ptr :i32 :i32 :ptr]
                :thumbnail     [:ptr "imaging_thumbnail" :ptr :i32 :i32]
@@ -250,9 +252,9 @@
     ;; dropped handle must not leak the Rust allocation for the whole process.
     ;; The action must NOT capture `i` (that would keep it reachable forever).
     (.register ^Cleaner @cleaner i (reify Runnable
-                           (run [_]
-                             (when (.compareAndSet freed false true)
-                               (free-image! p)))))
+                                     (run [_]
+                                       (when (.compareAndSet freed false true)
+                                         (free-image! p)))))
     i))
 
 (defn close!
@@ -399,7 +401,7 @@
   (with-open [arena (Arena/ofConfined)]
     (let [^bytes b (->bytes data)
           m        (or (some-> (take-string!
-                                 (invoke :decode-gif (alloc-bytes arena b) (long (alength b))))
+                                (invoke :decode-gif (alloc-bytes arena b) (long (alength b))))
                                json->)
                        (fail! :decode-gif))]
       (-> m
@@ -422,6 +424,82 @@
                                          fs))))]
     (with-open [arena (Arena/ofConfined)]
       (take-bytes! (invoke :encode-gif (json-arg arena wire)) :encode-gif))))
+
+;; ---------------------------------------------------------------------------
+;; Public API — video (MP4 / H.264)
+;; ---------------------------------------------------------------------------
+
+(defn mp4?
+  "True when `data` looks like an ISO-BMFF/MP4 container (a `ftyp` box at byte
+   4). A sniff, not a validation — `probe-video` is the one that reads tracks."
+  [data]
+  (let [^bytes b (->bytes data)]
+    (and (>= (alength b) 12)
+         (= 102 (aget b 4)) (= 116 (aget b 5))
+         (= 121 (aget b 6)) (= 112 (aget b 7)))))
+
+(defn probe-video
+  "Identify an MP4 without decoding a frame:
+   `{:format :codec :codec-kind :is-decodable :width :height :frames :duration-s
+   :fps :timescale :has-audio}`. `:frames` is the sample count and `:width`
+   /`:height` the container's declared track size — the bitstream's own size is
+   what `decode-video` reports. `:is-decodable` is false for a video track this
+   build cannot decode (HEVC, AV1, VP9); only H.264/AVC decodes."
+  [data]
+  (with-open [arena (Arena/ofConfined)]
+    (let [^bytes b (->bytes data)]
+      (or (some-> (take-string! (invoke :probe-video (alloc-bytes arena b) (long (alength b))))
+                  json->)
+          (fail! :probe-video)))))
+
+(defn decode-video
+  "Decode an MP4's H.264 track into
+   `{:format :codec :encoding :width :height :source-width :source-height
+   :frame-count :total-frames :duration-s :fps :frames}`, where each frame is
+   `{:index :timestamp-s :data}` and `:data` is a byte[].
+
+   `:encoding` decides what those bytes are: `\"rgba\"` (default) is straight
+   RGBA8 rows, `width*height*4`, ready for `from-pixels`; anything `encode`
+   understands (`\"png\"`, `\"jpeg\"`, `\"webp\"`, ...) is an ENCODED still, which is
+   far smaller and what a terminal or browser wants anyway.
+
+   Frames come out in DISPLAY order (B-frames are reordered), and RGBA is
+   converted with the BT.601 limited-range matrix.
+
+   Options bound the work — the whole clip is decoded into memory otherwise:
+   `:max-frames` (stop after N), `:stride` (keep every Nth frame),
+   `:max-dimension` (downscale to fit), `:filter`, plus `:quality` for lossy
+   `:encoding`."
+  ([data] (decode-video data nil))
+  ([data opts]
+   (with-open [arena (Arena/ofConfined)]
+     (let [^bytes b (->bytes data)
+           m        (or (some-> (take-string!
+                                 (invoke :decode-video (alloc-bytes arena b) (long (alength b))
+                                         (json-arg arena opts)))
+                                json->)
+                        (fail! :decode-video))]
+       (-> m
+           (assoc :frame-count (long (:frames m)))
+           (dissoc :frames-data)
+           (assoc :frames (mapv #(update % :data b64-decode) (:frames-data m))))))))
+
+(defn video->gif
+  "Transcode an MP4 straight to an animated GIF byte[] — the frames never cross
+   the FFI boundary, so this is the cheap way to make a clip watchable anywhere
+   a GIF is (a terminal, a chat wire that allows `image/gif`, a browser).
+
+   Options: the `decode-video` ones (`:max-frames` `:stride` `:max-dimension`
+   `:filter`) plus `:fps` (playback rate; default the source rate divided by
+   `:stride`) and `:loop-count` (-1/omitted = forever). GIF stores its delay in
+   CENTIseconds, so the frame rate is quantised to 1/100 s."
+  (^bytes [data] (video->gif data nil))
+  (^bytes [data opts]
+   (with-open [arena (Arena/ofConfined)]
+     (let [^bytes b (->bytes data)]
+       (take-bytes! (invoke :video->gif (alloc-bytes arena b) (long (alength b))
+                            (json-arg arena opts))
+                    :video->gif)))))
 
 (defn convert
   "One-shot decode -> normalise -> re-encode: the \"make this attachment safe to
@@ -726,13 +804,13 @@
    a byte[], File, Path, URL or InputStream, and cross as base64."
   [spec]
   (walk/postwalk
-    (fn [v]
-      (if (or (bytes? v)
-              (instance? File v) (instance? Path v) (instance? URL v)
-              (instance? InputStream v) (instance? java.nio.ByteBuffer v))
-        (b64-encode (->bytes v))
-        v))
-    spec))
+   (fn [v]
+     (if (or (bytes? v)
+             (instance? File v) (instance? Path v) (instance? URL v)
+             (instance? InputStream v) (instance? java.nio.ByteBuffer v))
+       (b64-encode (->bytes v))
+       v))
+   spec))
 
 (defn office
   "Build an Office Open XML document from a declarative spec and return its

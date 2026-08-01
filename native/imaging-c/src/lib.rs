@@ -29,6 +29,7 @@ mod quant;
 mod svg;
 mod text;
 mod util;
+mod video;
 mod xlsx;
 
 use std::ffi::{CStr, c_char};
@@ -41,7 +42,7 @@ use util::{Buf, R, Rgba, clear_error, err, into_c_string, set_error, take_error}
 const VERSION: &str = concat!(
     "clj-imaging-cdylib ",
     env!("CARGO_PKG_VERSION"),
-    " (resvg 0.47, image 0.25)\0"
+    " (resvg 0.47, image 0.25, re_mp4 0.5 + rust_h264 0.4)\0"
 );
 
 // ---------------------------------------------------------------------------
@@ -330,6 +331,68 @@ pub unsafe extern "C" fn imaging_encode_gif(spec: *const c_char) -> *mut Buf {
     buf_out(guard(|| {
         let v = json_arg(spec)?;
         imgops::encode_gif(&v)
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// video (MP4/H.264)
+// ---------------------------------------------------------------------------
+
+/// Identify an MP4 without decoding a single frame: JSON
+/// `{format codec codec_kind width height frames duration_s fps timescale
+///   is_decodable has_audio}`. `is_decodable` is false for a container this
+/// build cannot decode (HEVC, AV1, VP9), and `error` then says why.
+///
+/// # Safety
+///
+/// `data`/`len` must describe a readable byte range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_probe_video(data: *const u8, len: u64) -> *mut c_char {
+    json_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        video::probe(d)
+    }))
+}
+
+/// Decode an MP4's H.264 track into JSON `{width height fps duration_s codec
+/// frame_count encoding frames[]}` — each frame `{index timestamp_s data}` with
+/// `data` base64 in `encoding` (`rgba` straight RGBA8 rows, or `png`/`jpeg`
+/// bytes). Options JSON: `max_frames`, `stride` (emit every Nth frame),
+/// `max_dimension` (downscale to fit), `encoding`, `quality`.
+///
+/// # Safety
+///
+/// `data`/`len` must be readable; `opts` a C string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_decode_video(
+    data: *const u8,
+    len: u64,
+    opts: *const c_char,
+) -> *mut c_char {
+    json_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        let o = json_arg(opts)?;
+        video::decode(d, &o)
+    }))
+}
+
+/// Transcode an MP4 straight to an animated GIF, without the frames ever
+/// crossing the ABI. Options JSON: `max_frames`, `stride`, `max_dimension`,
+/// `fps` (override the container's), `loop_count`.
+///
+/// # Safety
+///
+/// `data`/`len` must be readable; `opts` a C string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_video_to_gif(
+    data: *const u8,
+    len: u64,
+    opts: *const c_char,
+) -> *mut Buf {
+    buf_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        let o = json_arg(opts)?;
+        video::to_gif(d, &o)
     }))
 }
 
