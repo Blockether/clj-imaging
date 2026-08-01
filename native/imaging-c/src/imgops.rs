@@ -3,8 +3,12 @@
 
 use std::io::Cursor;
 
+use base64::Engine as _;
 use image::imageops::FilterType;
-use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat, RgbaImage};
+use image::metadata::LoopCount;
+use image::{
+    AnimationDecoder, ColorType, Delay, DynamicImage, Frame, ImageDecoder, ImageFormat, RgbaImage,
+};
 use resvg::tiny_skia;
 
 use crate::util::{R, Rgba, err, from_pixmap, to_pixmap};
@@ -69,8 +73,32 @@ impl Image {
 // decode / probe
 // ---------------------------------------------------------------------------
 
+/// How much a DECODE may allocate. The `image` crate's own default is 512 MiB,
+/// which silently rejects any image whose RGBA8 buffer is bigger than that —
+/// roughly 134 MP, so an 11600x11600 PNG (537 MiB) comes back as "cannot
+/// identify image file" even though the file is perfectly valid. Decoded
+/// buffers are already bounded by `Image::new`'s 512 Mi-PIXEL cap (2 GiB of
+/// RGBA8), so that is the ceiling decoding gets too: one limit, stated once,
+/// instead of two that disagree.
+const DECODE_MAX_ALLOC: u64 = 2 * 1024 * 1024 * 1024;
+
+/// A format-guessing reader carrying OUR allocation ceiling. One place, so
+/// `decode` and `probe` can never drift apart on how big an image may be.
+#[allow(clippy::field_reassign_with_default)]
+fn reader(data: &[u8]) -> R<image::ImageReader<Cursor<&[u8]>>> {
+    let mut r = image::ImageReader::new(Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| format!("decode failed: {e}"))?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(DECODE_MAX_ALLOC);
+    r.limits(limits);
+    Ok(r)
+}
+
 pub fn decode(data: &[u8]) -> R<Image> {
-    let img = image::load_from_memory(data).map_err(|e| format!("decode failed: {e}"))?;
+    let img = reader(data)?
+        .decode()
+        .map_err(|e| format!("decode failed: {e}"))?;
     Ok(Image {
         buf: img.to_rgba8(),
     })
@@ -82,9 +110,7 @@ pub fn decode(data: &[u8]) -> R<Image> {
 /// a decoded handle can no longer tell you: `decode` normalises everything to
 /// RGBA8.
 pub fn probe(data: &[u8]) -> R<serde_json::Value> {
-    let reader = image::ImageReader::new(Cursor::new(data))
-        .with_guessed_format()
-        .map_err(|e| format!("probe failed: {e}"))?;
+    let reader = reader(data)?;
     let format = reader
         .format()
         .map(format_name)
@@ -258,6 +284,117 @@ pub fn encode(img: &Image, format: &str, quality: u8) -> R<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
+// animated GIF — the only multi-frame format with a pure-Rust path. Decoded as
+// JSON so the handle-free Clojure surface can stay Opaque: every frame's RGBA
+// rows are base64, so the contract is {width height loop-count frames[]}, each
+// frame {delay-ms rgba}. This is where animated GIF support actually lives
+// now, instead of a hand-rolled Clojure codec that could not survive a Rust
+// decode-limit change.
+// ---------------------------------------------------------------------------
+
+/// Decode an animated GIF into `{width height loop-count frames[]}`, each frame
+/// `{delay-ms rgba}` with `rgba` the straight RGBA8 rows as base64. A still GIF
+/// (one frame) decodes the same way, with a single entry. GIFs are always RGBA8
+/// (the decoder expands the palette), so there is no colour-type branch here.
+pub fn decode_gif(data: &[u8]) -> R<serde_json::Value> {
+    use image::codecs::gif::GifDecoder;
+    let dec = GifDecoder::new(Cursor::new(data)).map_err(|e| format!("gif decode failed: {e}"))?;
+    let loop_count = match dec.loop_count() {
+        LoopCount::Infinite => -1,
+        LoopCount::Finite(n) => n.get() as i64,
+    };
+    let (width, height) = dec.dimensions();
+    let frames = dec
+        .into_frames()
+        .collect_frames()
+        .map_err(|e| format!("gif decode failed: {e}"))?;
+    if frames.is_empty() {
+        return err("gif has no frames");
+    }
+    let frames_json: Vec<serde_json::Value> = frames
+        .iter()
+        .map(|f| {
+            let (numer, denom) = f.delay().numer_denom_ms();
+            let delay_ms = if denom == 0 { 0 } else { numer / denom };
+            let rgba = f.buffer().as_raw();
+            serde_json::json!({
+                "delay_ms": delay_ms,
+                "rgba": base64::engine::general_purpose::STANDARD.encode(rgba),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "width": width,
+        "height": height,
+        "loop_count": loop_count,
+        "frames": frames_json,
+    }))
+}
+
+/// Encode an animated GIF from the same JSON shape `decode_gif` produces. Each
+/// frame is `{delay-ms rgba}`; `rgba` is base64 straight RGBA8 sized to
+/// `width`x`height` (sub-frames are not supported — every frame is a full
+/// canvas, which is what PIL's save_all and the old Clojure codec produced).
+/// `loop-count` is the iteration count; -1 (or omitted) means loop forever.
+pub fn encode_gif(spec: &serde_json::Value) -> R<Vec<u8>> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    let width = spec
+        .get("width")
+        .and_then(|v| v.as_u64())
+        .ok_or("gif spec needs width")? as u32;
+    let height = spec
+        .get("height")
+        .and_then(|v| v.as_u64())
+        .ok_or("gif spec needs height")? as u32;
+    let frames = spec
+        .get("frames")
+        .and_then(|v| v.as_array())
+        .ok_or("gif spec needs frames")?;
+    if frames.is_empty() {
+        return err("gif needs at least one frame");
+    }
+    let loop_count = spec
+        .get("loop_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+
+    let mut out = Cursor::new(Vec::new());
+    let mut enc = GifEncoder::new(&mut out);
+    if loop_count < 0 {
+        enc.set_repeat(Repeat::Infinite)
+            .map_err(|e| format!("gif encode failed: {e}"))?;
+    } else {
+        enc.set_repeat(Repeat::Finite(loop_count.min(u16::MAX as i64) as u16))
+            .map_err(|e| format!("gif encode failed: {e}"))?;
+    }
+
+    let need = (width as usize) * (height as usize) * 4;
+    for (i, f) in frames.iter().enumerate() {
+        let delay_ms = f.get("delay_ms").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let rgba_b64 = f
+            .get("rgba")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("gif frame {i} needs rgba"))?;
+        let rgba = base64::engine::general_purpose::STANDARD
+            .decode(rgba_b64)
+            .map_err(|e| format!("gif frame {i} bad base64: {e}"))?;
+        if rgba.len() < need {
+            return err(format!(
+                "gif frame {i}: {need} bytes expected, got {}",
+                rgba.len()
+            ));
+        }
+        let buf = RgbaImage::from_raw(width, height, rgba[..need].to_vec())
+            .ok_or_else(|| format!("gif frame {i}: cannot build image from pixels"))?;
+        let frame = Frame::from_parts(buf, 0, 0, Delay::from_numer_denom_ms(delay_ms, 1));
+        enc.encode_frame(frame)
+            .map_err(|e| format!("gif encode failed: {e}"))?;
+    }
+
+    drop(enc);
+    Ok(out.into_inner())
+}
+
 // transforms
 // ---------------------------------------------------------------------------
 

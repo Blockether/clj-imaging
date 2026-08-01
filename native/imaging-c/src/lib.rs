@@ -17,11 +17,19 @@
 //!     into a failure with the panic message as the error.
 
 mod canvas;
+mod docx;
+mod filter;
 mod imgops;
+mod office;
+mod optimize;
 mod plot;
+mod plot3d;
+mod pptx;
+mod quant;
 mod svg;
 mod text;
 mod util;
+mod xlsx;
 
 use std::ffi::{CStr, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -296,6 +304,136 @@ pub unsafe extern "C" fn imaging_encode(
     }))
 }
 
+/// Decode an animated GIF into JSON `{width height loop-count frames[]}` — each
+/// frame `{delay-ms rgba}` with `rgba` base64 straight RGBA8. Stills come back
+/// as a one-element `frames`. See `imgops::decode_gif`.
+///
+/// # Safety
+///
+/// `data`/`len` must describe a readable byte range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_decode_gif(data: *const u8, len: u64) -> *mut c_char {
+    json_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        imgops::decode_gif(d)
+    }))
+}
+
+/// Encode an animated GIF from the JSON shape `imaging_decode_gif` produces.
+/// `spec` is that JSON as a C string; the returned `Buf` holds the GIF bytes.
+///
+/// # Safety
+///
+/// `spec` must be null or a NUL-terminated JSON C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_encode_gif(spec: *const c_char) -> *mut Buf {
+    buf_out(guard(|| {
+        let v = json_arg(spec)?;
+        imgops::encode_gif(&v)
+    }))
+}
+
+/// Shrink an encoded image with real, format-specific optimisers: oxipng (with
+/// optional zopfli) for PNG, an optimised-Huffman/progressive JPEG encoder, and
+/// a differencing GIF re-encoder. Options JSON: `format` (default: keep the
+/// input's), `level` 0-6 effort, `lossy` (palette-quantise PNG, allow JPEG
+/// re-encode), `colors`, `dither`, `quality`, `progressive`, `strip`,
+/// `background`, `max_width`/`max_height`, `max_bytes`, `force`.
+///
+/// # Safety
+/// `data`/`len` must be readable; `opts` a C string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_optimize(
+    data: *const u8,
+    len: u64,
+    opts: *const c_char,
+) -> *mut Buf {
+    buf_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        let o = json_arg(opts)?;
+        optimize::optimize(d, &o)
+    }))
+}
+
+/// Median-cut colour quantisation with optional Floyd-Steinberg dithering.
+/// Returns JSON `{width height palette indices transparent rgba}` where
+/// `palette` is `0xRRGGBB` ints and `indices`/`rgba` are base64.
+///
+/// # Safety
+/// `p` must be a live image handle from this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_quantize(p: *mut Image, colors: u32, dither: i32) -> *mut c_char {
+    json_out(guard(|| {
+        let img = unsafe { image(p) }?;
+        Ok(quant::quantize_json(
+            img,
+            colors.clamp(1, 256) as usize,
+            dither != 0,
+        ))
+    }))
+}
+
+/// Neighbourhood filter: Pillow's `ImageFilter.Kernel` (odd `size`, `kernel`
+/// weights, `scale`, `offset`) and the rank family (`kind` `rank`/`median`/
+/// `min`/`max`). Edges clamp; `convolve` keeps the source alpha.
+///
+/// # Safety
+/// `p` must be a live image handle from this library; `opts` a C string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_filter(p: *mut Image, opts: *const c_char) -> *mut Image {
+    img_out(guard(|| {
+        let o = json_arg(opts)?;
+        filter::filter(unsafe { image(p) }?, &o)
+    }))
+}
+
+/// Build an Office Open XML document from a declarative JSON spec: `kind` is
+/// `xlsx` (rust_xlsxwriter), `docx` (WordprocessingML) or `pptx`
+/// (PresentationML). No Java, no POI — the whole package is produced here.
+///
+/// # Safety
+/// `kind` and `spec` must be C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_office_build(
+    kind: *const c_char,
+    spec: *const c_char,
+) -> *mut Buf {
+    buf_out(guard(|| {
+        let Some(k) = (unsafe { cstr(kind) }) else {
+            return util::err("`kind` is required (xlsx, docx or pptx)");
+        };
+        let k = k.to_ascii_lowercase();
+        let v = json_arg(spec)?;
+        match k.as_str() {
+            "xlsx" => xlsx::write(&v),
+            "docx" => docx::build(&v),
+            "pptx" => pptx::build(&v),
+            other => util::err(format!(
+                "unknown office document kind: {other} (expected xlsx, docx or pptx)"
+            )),
+        }
+    }))
+}
+
+/// Read an Office document back: workbooks (`xlsx`/`xlsm`/`xlsb`/`xls`/`ods`)
+/// come back as `{kind sheets[{name rows}]}`, `docx`/`pptx` as extracted text.
+/// Options JSON: `sheet`, `header`, `max_rows`.
+///
+/// # Safety
+/// `data`/`len` must be readable; `opts` a C string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_office_read(
+    data: *const u8,
+    len: u64,
+    opts: *const c_char,
+) -> *mut c_char {
+    json_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        let o = json_arg(opts)?;
+        office::read(d, &o)
+    }))
+}
+
 /// One-shot decode -> normalise -> re-encode, the "make this attachment safe to
 /// send" path. Options JSON: `format`, `quality`, `max_width`, `max_height`,
 /// `width`, `height`, `background` (flatten alpha onto it), `filter`,
@@ -565,6 +703,29 @@ pub unsafe extern "C" fn imaging_svg_render(
         let d = unsafe { bytes(data, len) }?;
         let o = json_arg(opts)?;
         svg::render(d, &o)
+    }))
+}
+
+/// Browser-compatible sizing for an SVG document: JSON `{"width","height",
+/// "source","is_repaired","svg"}`. `source` is `declared` (resvg's own resolved
+/// size), `view_box`, `content` (framed by the ink it paints) or `default`;
+/// `svg` is the base64 of the REPAIRED document when one was needed, else null.
+///
+/// Options JSON: `min_dimension`/`max_dimension` (the band an ink-framed canvas
+/// is scaled into, 512/4096) plus the `imaging_svg_render` parse options.
+///
+/// # Safety
+/// `data`/`len` must be readable; `opts` a C string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_svg_canvas(
+    data: *const u8,
+    len: u64,
+    opts: *const c_char,
+) -> *mut c_char {
+    json_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        let o = json_arg(opts)?;
+        svg::canvas_json(d, &o)
     }))
 }
 

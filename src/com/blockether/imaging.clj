@@ -33,6 +33,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [clojure.walk :as walk]
             [com.blockether.nativeresolver :as nr]
             [com.blockether.nativeresolver.ffm :as ffm])
   (:import [java.io ByteArrayOutputStream File InputStream]
@@ -75,6 +76,8 @@
                :pixels        [:ptr "imaging_pixels" :ptr]
                :info          [:ptr "imaging_info" :ptr]
                :encode        [:ptr "imaging_encode" :ptr :ptr :i32]
+               :decode-gif    [:ptr "imaging_decode_gif" :ptr :i64]
+               :encode-gif    [:ptr "imaging_encode_gif" :ptr]
                :convert       [:ptr "imaging_convert" :ptr :i64 :ptr]
                :resize        [:ptr "imaging_resize" :ptr :i32 :i32 :ptr]
                :thumbnail     [:ptr "imaging_thumbnail" :ptr :i32 :i32]
@@ -92,11 +95,36 @@
                :draw          [:i32 "imaging_draw" :ptr :ptr]
                :text-measure  [:ptr "imaging_text_measure" :ptr]
                :svg-render    [:ptr "imaging_svg_render" :ptr :i64 :ptr]
+               :svg-canvas    [:ptr "imaging_svg_canvas" :ptr :i64 :ptr]
                :plot          [:ptr "imaging_plot" :ptr]
                :register-font [:ptr "imaging_register_font" :ptr :i64]
-               :fonts         [:ptr "imaging_fonts"]})))
+               :fonts         [:ptr "imaging_fonts"]
+               :optimize      [:ptr "imaging_optimize" :ptr :i64 :ptr]
+               :quantize      [:ptr "imaging_quantize" :ptr :i32 :i32]
+               :filter        [:ptr "imaging_filter" :ptr :ptr]
+               :office-build  [:ptr "imaging_office_build" :ptr :ptr]
+               :office-read   [:ptr "imaging_office_read" :ptr :i64 :ptr]})))
 
-(defn- invoke [k & args] (apply nr/invoke @handles k args))
+(declare img? seg)
+
+(defn- invoke
+  "Call the cdylib. An `Img` argument is resolved to its native pointer and then
+   held REACHABLE across the call: without the fence the handle's last Clojure
+   reference can die at the `seg` read, the `Cleaner` can run on another thread
+   and free the Rust allocation while the native call is still reading it. The
+   handle stays lock-free (a single CAS decides who frees); the fence only stops
+   the collector, it never blocks."
+  [k & args]
+  (let [args' (mapv #(if (img? %) (seg %) %) args)]
+    (try
+      (apply nr/invoke @handles k args')
+      (finally
+        (run! #(when (img? %) (java.lang.ref.Reference/reachabilityFence %)) args)))))
+
+(defn- keep-live!
+  "Fence handles whose pointers travelled into a call some other way (as an
+   address inside a JSON payload, say) rather than as an argument."
+  [xs] (run! #(java.lang.ref.Reference/reachabilityFence %) xs) nil)
 
 (defn- null? [^MemorySegment p] (ffm/null? p))
 
@@ -134,6 +162,14 @@
 
 (defn- json-> [^String s]
   (when s (json/read-str s :key-fn (fn [k] (keyword (str/replace k \_ \-))))))
+
+(defn- b64-encode
+  ^String [^bytes b]
+  (.encodeToString (java.util.Base64/getEncoder) b))
+
+(defn- b64-decode
+  ^bytes [^String s]
+  (.decode (java.util.Base64/getDecoder) s))
 
 (def ^:private named-colors
   {"transparent" 0x00000000 "black" 0x000000ff "white" 0xffffffff "red" 0xff0000ff
@@ -310,7 +346,8 @@
 
 (defn decode
   "Decode PNG/JPEG/WebP/GIF/BMP/TIFF/ICO/QOI/PNM/TGA/HDR/EXR bytes — or an
-   SVG/SVGZ document — into an `Img` handle. Close it (`with-open`) when done."
+   SVG/SVGZ document, sized the way a browser would (see `svg-canvas`) — into an
+   `Img` handle. Close it (`with-open`) when done."
   ^Img [data]
   (with-open [arena (Arena/ofConfined)]
     (let [^bytes b (->bytes data)]
@@ -330,13 +367,13 @@
 
 (defn pixels
   "The image's straight RGBA8 rows as a byte[]."
-  ^bytes [img] (take-bytes! (invoke :pixels (seg img)) :pixels))
+  ^bytes [img] (take-bytes! (invoke :pixels img) :pixels))
 
 (defn info
   "`{:width :height :is-opaque :is-grayscale}` — read off the handle's own RGBA8
    pixels (`:is-grayscale` = every pixel has r = g = b), not off the file it came
    from; `probe` answers that one."
-  [img] (or (some-> (take-string! (invoke :info (seg img))) json->) (fail! :info)))
+  [img] (or (some-> (take-string! (invoke :info img)) json->) (fail! :info)))
 
 (defn width ^long [img] (long (:width (info img))))
 (defn height ^long [img] (long (:height (info img))))
@@ -349,8 +386,42 @@
   (^bytes [img fmt] (encode img fmt nil))
   (^bytes [img fmt quality]
    (with-open [arena (Arena/ofConfined)]
-     (take-bytes! (invoke :encode (seg img) (cs arena (name (or fmt :png))) (int (or quality 0)))
+     (take-bytes! (invoke :encode img (cs arena (name (or fmt :png))) (int (or quality 0)))
                   :encode))))
+
+(defn decode-gif
+  "Decode an animated (or still) GIF into `{:width :height :loop-count :frames}`,
+   where each frame is `{:delay-ms :rgba}` with `:rgba` the straight RGBA8 rows
+   as a byte[] (`width*height*4`). `:loop-count` is the iteration count, -1 for
+   loop forever. The native multi-frame path — an animated GIF no longer needs a
+   hand-rolled Clojure codec."
+  [data]
+  (with-open [arena (Arena/ofConfined)]
+    (let [^bytes b (->bytes data)
+          m        (or (some-> (take-string!
+                                 (invoke :decode-gif (alloc-bytes arena b) (long (alength b))))
+                               json->)
+                       (fail! :decode-gif))]
+      (-> m
+          (update :frames (fn [fs] (mapv #(update % :rgba b64-decode) fs)))
+          (assoc :loop-count (long (:loop-count m)))))))
+
+(defn encode-gif
+  "Encode an animated GIF from `{:width :height :loop-count :frames}`, each frame
+   `{:delay-ms :rgba}` (straight RGBA8 byte[]). `:loop-count` -1/omitted = loop
+   forever. Returns a byte[]."
+  ^bytes [spec]
+  (let [wire (-> spec
+                 (assoc :width     (long (:width spec))
+                        :height    (long (:height spec))
+                        :loop-count (long (or (:loop-count spec) -1)))
+                 (update :frames (fn [fs]
+                                   (mapv (fn [f]
+                                           {:delay-ms (long (or (:delay-ms f) 0))
+                                            :rgba    (b64-encode (:rgba f))})
+                                         fs))))]
+    (with-open [arena (Arena/ofConfined)]
+      (take-bytes! (invoke :encode-gif (json-arg arena wire)) :encode-gif))))
 
 (defn convert
   "One-shot decode -> normalise -> re-encode: the \"make this attachment safe to
@@ -387,22 +458,22 @@
   (^Img [img w h] (resize img w h nil))
   (^Img [img w h filter]
    (with-open [arena (Arena/ofConfined)]
-     (img! (invoke :resize (seg img) (int w) (int h) (cs arena (some-> filter name))) :resize))))
+     (img! (invoke :resize img (int w) (int h) (cs arena (some-> filter name))) :resize))))
 
 (defn thumbnail
   "Scale DOWN to fit inside `max-w` x `max-h`, preserving aspect ratio."
   ^Img [img max-w max-h]
-  (img! (invoke :thumbnail (seg img) (int max-w) (int max-h)) :thumbnail))
+  (img! (invoke :thumbnail img (int max-w) (int max-h)) :thumbnail))
 
 (defn crop ^Img [img x y w h]
-  (img! (invoke :crop (seg img) (long x) (long y) (int w) (int h)) :crop))
+  (img! (invoke :crop img (long x) (long y) (int w) (int h)) :crop))
 
 (defn rotate
   "Rotate counter-clockwise by `degrees`. `:expand` true grows the canvas to hold
    the rotated image; `:background` fills behind it."
   (^Img [img degrees] (rotate img degrees nil))
   (^Img [img degrees {:keys [expand background]}]
-   (img! (invoke :rotate (seg img) (double degrees) (int (if expand 1 0))
+   (img! (invoke :rotate img (double degrees) (int (if expand 1 0))
                  (unchecked-int (color background)))
          :rotate)))
 
@@ -410,23 +481,23 @@
   "`:horizontal`/`:h` or `:vertical`/`:v`."
   ^Img [img mode]
   (with-open [arena (Arena/ofConfined)]
-    (img! (invoke :flip (seg img) (cs arena (name mode))) :flip)))
+    (img! (invoke :flip img (cs arena (name mode))) :flip)))
 
-(defn grayscale ^Img [img] (img! (invoke :grayscale (seg img)) :grayscale))
-(defn invert ^Img [img] (img! (invoke :invert (seg img)) :invert))
-(defn blur ^Img [img sigma] (img! (invoke :blur (seg img) (float sigma)) :blur))
+(defn grayscale ^Img [img] (img! (invoke :grayscale img) :grayscale))
+(defn invert ^Img [img] (img! (invoke :invert img) :invert))
+(defn blur ^Img [img sigma] (img! (invoke :blur img (float sigma)) :blur))
 
 (defn flatten
   "Composite onto an opaque background (default white)."
   (^Img [img] (flatten img "#ffffffff"))
-  (^Img [img bg] (img! (invoke :flatten (seg img) (unchecked-int (color bg))) :flatten)))
+  (^Img [img bg] (img! (invoke :flatten img (unchecked-int (color bg))) :flatten)))
 
 (defn adjust
   "Photometric adjustment: `:brightness` `:contrast` `:saturation` `:opacity`
    (1.0 = unchanged)."
   ^Img [img opts]
   (with-open [arena (Arena/ofConfined)]
-    (img! (invoke :adjust (seg img) (json-arg arena opts)) :adjust)))
+    (img! (invoke :adjust img (json-arg arena opts)) :adjust)))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API — mutation
@@ -437,18 +508,18 @@
    destination pixels instead of alpha-compositing."
   ([dst src x y] (paste! dst src x y nil))
   ([dst src x y {:keys [blend] :or {blend true}}]
-   (when (neg? (int (invoke :paste (seg dst) (seg src) (long x) (long y) (int (if blend 1 0)))))
+   (when (neg? (int (invoke :paste dst src (long x) (long y) (int (if blend 1 0)))))
      (fail! :paste))
    dst))
 
 (defn get-pixel
   "Packed `0xRRGGBBAA` of one pixel, or nil when out of bounds."
   [img x y]
-  (let [v (long (invoke :get-pixel (seg img) (int x) (int y)))]
+  (let [v (long (invoke :get-pixel img (int x) (int y)))]
     (when-not (neg? v) v)))
 
 (defn put-pixel! [img x y c]
-  (when (neg? (int (invoke :put-pixel (seg img) (int x) (int y) (unchecked-int (color c)))))
+  (when (neg? (int (invoke :put-pixel img (int x) (int y) (unchecked-int (color c)))))
     (fail! :put-pixel))
   img)
 
@@ -482,11 +553,17 @@
                   (-> (reduce (fn [o k] (if (contains? o k) (update o k #(format "#%08x" (color %))) o))
                               op [:fill :stroke :background])
                       (cond-> (img? (:image op))
-                        (assoc :image (str "handle:" (.address ^MemorySegment (seg (:image op))))))))]
+                        (assoc :image (str "handle:" (.address ^MemorySegment (seg (:image op))))))))
+        ;; The pasted handles reach the cdylib as bare addresses inside the JSON,
+        ;; so `invoke` cannot see them: fence them here or the Cleaner may free a
+        ;; source image mid-draw.
+        live    (into [] (keep :image) ops)]
     (with-open [arena (Arena/ofConfined)]
-      (when (neg? (int (invoke :draw (seg img)
-                               (.allocateFrom arena (->json {:ops (mapv prepare ops)})))))
-        (fail! :draw)))
+      (try
+        (when (neg? (int (invoke :draw img
+                                 (.allocateFrom arena (->json {:ops (mapv prepare ops)})))))
+          (fail! :draw))
+        (finally (keep-live! live))))
     img))
 
 (defn text-measure
@@ -505,7 +582,11 @@
 (defn render-svg
   "Rasterise an SVG/SVGZ document (bytes, markup String, File, path, stream) with
    resvg. Options: `:width` `:height` `:scale` `:max-width` `:max-height`
-   `:background` `:dpi` `:font-family` `:font-size` `:base-url`."
+   `:background` `:dpi` `:font-family` `:font-size` `:base-url`.
+
+   The canvas is REPAIRED by default: a document with a zero, negative or absent
+   size is sized the way a BROWSER would (see `svg-canvas`) instead of failing
+   resvg's size check. Pass `:repair false` for resvg's literal answer."
   (^Img [svg] (render-svg svg nil))
   (^Img [svg opts]
    (with-open [arena (Arena/ofConfined)]
@@ -514,6 +595,32 @@
                      (json-arg arena (color-opt opts [:background])))
              :svg-render)))))
 
+(defn svg-canvas
+  "How a BROWSER would size an SVG/SVGZ document (bytes, markup String, File,
+   path, stream): `{:width :height :source :is-repaired :svg}`.
+
+   resvg answers only for documents that declare a usable size: it refuses a zero
+   or negative one, and measures a size-less document from the ORIGIN, so a
+   figure drawn at x=50 gets 50px of dead margin. A browser falls back to the
+   `viewBox`, then to the ink actually painted. `:source` says which rule won —
+   `\"declared\"` (resvg's own resolved size), `\"view_box\"`, `\"content\"` or
+   `\"default\"` — and `:svg` is the REPAIRED markup (a byte[], nil when the
+   document needed no repair), which `render-svg`/`decode` rasterise as drawn.
+
+   `render-svg` with `:repair true` does exactly this internally. Options:
+   `:min-dimension` (512) and `:max-dimension` (4096) bound an ink-framed canvas,
+   plus the parse options of `render-svg`."
+  ([svg] (svg-canvas svg nil))
+  ([svg opts]
+   (with-open [arena (Arena/ofConfined)]
+     (let [^bytes b (->bytes svg)
+           m        (or (some-> (take-string!
+                                 (invoke :svg-canvas (alloc-bytes arena b) (long (alength b))
+                                         (json-arg arena (color-opt opts [:background]))))
+                                json->)
+                        (fail! :svg-canvas))]
+       (cond-> m (:svg m) (update :svg b64-decode))))))
+
 (defn plot
   "Render a plot specification to an image. See `com.blockether.imaging.plot` for
    the spec builders (`line`, `bar`, `scatter`, `hist`, `pie`, `heatmap`, …) and
@@ -521,3 +628,198 @@
   ^Img [spec]
   (with-open [arena (Arena/ofConfined)]
     (img! (invoke :plot (.allocateFrom arena (->json spec))) :plot)))
+
+;; ---------------------------------------------------------------------------
+;; Public API — size optimisation
+;; ---------------------------------------------------------------------------
+
+(defn optimize
+  "Shrink an ENCODED image with the real, format-specific optimisers — oxipng
+   (filter/heuristic search, colour-type and palette reduction, optional zopfli)
+   for PNG, jpegtran-style lossless metadata stripping for JPEG, and a
+   differencing re-encoder (gifsicle's algorithm) for GIF. Takes and returns
+   encoded bytes.
+
+   LOSSLESS unless you ask otherwise: the pixels of a PNG or a JPEG come back
+   bit-identical unless `:lossy`, a `:quality`, a different `:format`, a
+   `:max-width`/`:max-height` or an unmeetable `:max-bytes` licenses a re-encode.
+
+   Options: `:format` (default: keep the input's) `:level` 0-6 effort
+   `:lossy` (palette-quantise PNG / re-encode JPEG) `:colors` `:dither`
+   `:quality` `:progressive` `:strip` (default true) `:background`
+   `:max-width` `:max-height` (downscale to fit, never enlarge)
+   `:max-bytes` (keep trying until it fits)
+   `:force` (return the optimised bytes even when they are bigger).
+
+   Returns a byte[] — the smaller of optimised and original unless `:force`."
+  (^bytes [data] (optimize data nil))
+  (^bytes [data opts]
+   (with-open [arena (Arena/ofConfined)]
+     (let [^bytes b (->bytes data)]
+       (take-bytes! (invoke :optimize (alloc-bytes arena b) (long (alength b))
+                            (json-arg arena (color-opt opts [:background])))
+                    :optimize)))))
+
+(defn quantize
+  "Median-cut colour quantisation with optional Floyd-Steinberg dithering — the
+   palette engine behind `optimize`'s lossy PNG and GIF paths.
+
+   Returns `{:width :height :palette :indices :transparent :rgba}`: `:palette` a
+   vector of `0xRRGGBB` ints, `:indices` one palette index per pixel (byte[]),
+   `:transparent` the palette slot used for fully transparent pixels (or nil),
+   `:rgba` the quantised image back as straight RGBA8 rows."
+  ([img] (quantize img nil))
+  ([img {:keys [colors dither] :or {colors 256 dither false}}]
+   (let [m (or (some-> (take-string! (invoke :quantize img (int colors) (int (if dither 1 0))))
+                       json->)
+               (fail! :quantize))]
+     (-> m
+         (update :palette vec)
+         (update :indices b64-decode)
+         (update :rgba b64-decode)))))
+
+;; ---------------------------------------------------------------------------
+;; Public API — neighbourhood filters
+;; ---------------------------------------------------------------------------
+
+(defn convolve
+  "Correlate `img` with an odd `size` x `size` `kernel` (a seq of `size*size`
+   weights, row-major) — blur, sharpen, emboss, edge detect: Pillow's
+   `ImageFilter.Kernel`, and the same arithmetic.
+
+   `:scale` divides the weighted sum (0 or nil = no division) and `:offset` is
+   added afterwards; the result is rounded half-up and clamped to 0..255. Edge
+   samples clamp to the border pixel and the source ALPHA is carried through
+   untouched, so blurring never eats a mask."
+  (^Img [img size kernel] (convolve img size kernel nil))
+  (^Img [img size kernel {:keys [scale offset] :or {scale 0 offset 0}}]
+   (with-open [arena (Arena/ofConfined)]
+     (img! (invoke :filter img (json-arg arena {:kind   "convolve"
+                                                :size   (int size)
+                                                :kernel (mapv double kernel)
+                                                :scale  (double scale)
+                                                :offset (double offset)}))
+           :filter))))
+
+(defn rank-filter
+  "Per-channel rank filter over an odd `size` x `size` window: every channel
+   (alpha included) is sorted independently and the `rank`-th smallest kept.
+   `:min` / `:median` / `:max` are the named ranks — Pillow's `MinFilter`,
+   `MedianFilter` and `MaxFilter`; an integer picks the rank directly."
+  ^Img [img size rank]
+  (with-open [arena (Arena/ofConfined)]
+    (let [n (* (long size) (long size))
+          r (case rank
+              (:min :minimum) 0
+              (:max :maximum) (dec n)
+              (:median nil) (quot n 2)
+              (long rank))]
+      (img! (invoke :filter img (json-arg arena {:kind "rank" :size (int size) :rank r}))
+            :filter))))
+
+;; ---------------------------------------------------------------------------
+;; Public API — Office Open XML documents
+;; ---------------------------------------------------------------------------
+
+(defn- office-wire
+  "Prepare an Office spec for the wire: binary payloads (`:data`) may be given as
+   a byte[], File, Path, URL or InputStream, and cross as base64."
+  [spec]
+  (walk/postwalk
+    (fn [v]
+      (if (or (bytes? v)
+              (instance? File v) (instance? Path v) (instance? URL v)
+              (instance? InputStream v) (instance? java.nio.ByteBuffer v))
+        (b64-encode (->bytes v))
+        v))
+    spec))
+
+(defn office
+  "Build an Office Open XML document from a declarative spec and return its
+   bytes. `kind` is `:xlsx`, `:docx` or `:pptx`. Pure Rust — rust_xlsxwriter for
+   workbooks, hand-written WordprocessingML/PresentationML for the rest; no POI,
+   no JVM document model, and it works in a native image.
+
+   See `xlsx`, `docx` and `pptx` for the per-kind spec."
+  ^bytes [kind spec]
+  (with-open [arena (Arena/ofConfined)]
+    (take-bytes! (invoke :office-build (cs arena (name kind))
+                         (.allocateFrom arena (->json (office-wire spec))))
+                 :office-build)))
+
+(defn xlsx
+  "A `.xlsx` workbook as bytes, written by rust_xlsxwriter.
+
+   `{:properties {:title :subject :author :manager :company :category :keywords
+                  :comments :status}
+     :sheets [{:name \"Sales\"
+               :columns [{:first 0 :last 3 :width 18 :format {…} :hidden false}]
+               :rows [{:index 0 :height 22 :format {…}}]
+               :freeze [row col] :autofilter [r1 c1 r2 c2]
+               :merges [{:range [r1 c1 r2 c2] :value … :format {…}}]
+               :images [{:row :col :data <bytes> :scale-x :scale-y}]
+               :cells [{:row 0 :col 0 :value \"Region\" :format {:bold true}}]}]}`
+
+   A cell's `:type` is optional — a string/number/boolean/nil is written as
+   itself; the explicit types are `string` `number` `boolean` `formula`
+   `datetime` `date` `time` `url` `blank` and `rich` (a run list of
+   `[format? text]`). A `:format` map (`:bold :italic :underline :font :size
+   :color :bg-color :align :valign :wrap :rotation :indent :border :num-format
+   :locked` …) is deduplicated into one workbook format automatically."
+  ^bytes [spec] (office :xlsx spec))
+
+(defn docx
+  "A `.docx` document as bytes (hand-written WordprocessingML).
+
+   `{:properties {…}
+     :page {:width-pt 595 :height-pt 842 :landscape false :margin-pt 72}
+     :blocks [{:type :heading :level 1 :text \"Q3\"}
+              {:type :paragraph :style :Quote :align :center :bullet true
+               :runs [{:text \"revenue \"} {:text \"up\" :bold true :color \"#c00\"}]}
+              {:type :table :header true :borders true
+               :rows [{:cells [{:text \"a\"} {:runs [{:text \"b\" :bold true}]}]}]}
+              {:type :image :data <bytes> :width-pt 240 :alt \"chart\"}
+              {:type :page-break}]}`
+
+   `:body` is accepted as a synonym for `:blocks`. Font sizes are points,
+   spacing/indent `*-pt` keys are points; the module converts to half-points and
+   twips."
+  ^bytes [spec] (office :docx spec))
+
+(defn pptx
+  "A `.pptx` presentation as bytes (hand-written PresentationML).
+
+   `{:width 12192000 :height 6858000            ; EMU, 16:9 by default
+     :properties {…}
+     :layouts [{:name \"Title Slide\" :type :title
+                :placeholders [{:type :ctrTitle :idx 0
+                                :left :top :width :height :size :align}]}]
+     :slides [{:layout 0 :background \"#ffffff\" :notes \"…\"
+               :shapes [{:kind :textbox|:auto|:picture|:table|:connector
+                         :left :top :width :height :rotation
+                         :preset :roundRect :fill \"#3366cc\" :line {:color :width}
+                         :image {:data <bytes>}
+                         :text-frame {:paragraphs [{:align :level :bullet
+                                                    :runs [{:text \"hi\" :bold true
+                                                            :size 1800}]}]}}]}]}`
+
+   Lengths are EMU (`914400` per inch), font sizes centipoints (`1800` = 18 pt) —
+   exactly how `python-pptx` normalises its own `Length`/`Pt` values."
+  ^bytes [spec] (office :pptx spec))
+
+(defn read-office
+  "Read an Office document back. Workbooks (`.xlsx` `.xlsm` `.xlsb` `.xls`
+   `.ods`) come back as `{:kind :sheets [{:name :rows [[cell …] …]}]}` with cells
+   already coerced to strings/numbers/booleans; `.docx` and `.pptx` come back as
+   `{:kind :text :paragraphs [...]}` (pptx also `:slides`).
+
+   Options: `:sheet` (name or index — read just that one), `:header` (treat the
+   first row as keys and return maps), `:max-rows`."
+  ([data] (read-office data nil))
+  ([data opts]
+   (with-open [arena (Arena/ofConfined)]
+     (let [^bytes b (->bytes data)]
+       (or (some-> (take-string! (invoke :office-read (alloc-bytes arena b) (long (alength b))
+                                         (json-arg arena opts)))
+                   json->)
+           (fail! :office-read))))))

@@ -22,6 +22,22 @@ usvg = "0.47"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.23"
+oxipng = { version = "10.1.1", default-features = false, features = ["zopfli"] }
+jpeg-encoder = "0.7.1"
+gif = "0.14.2"
+# Office (OOXML). Pure Rust, no system libraries and no Java: rust_xlsxwriter
+# writes .xlsx, `zip` + hand-written WordprocessingML/PresentationML write .docx
+# and .pptx, calamine reads .xlsx/.xls/.ods back. default-features off keeps the
+# C compression stacks (zstd, bzip2, lzma) out of the cdylib.
+rust_xlsxwriter = { version = "0.97", default-features = false, features = ["zlib"] }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+calamine = { version = "0.36", default-features = false, features = ["dates"] }
+quick-xml = "0.41"
+# Gunzip for `.svgz`: usvg unzips a document it PARSES, but the browser-fallback
+# sizing in svg.rs has to read the root tag's own attributes as TEXT. Already in
+# the tree through `zip`, and pinned to the same zlib-rs backend so there is only
+# one deflate implementation in the cdylib.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 [profile.release]
 lto = true

@@ -120,7 +120,7 @@ impl Axis {
 }
 
 /// Ticks at 1/2/2.5/5 × 10ⁿ — the spacing humans actually read.
-fn nice_step(range: f64, target: usize) -> f64 {
+pub(crate) fn nice_step(range: f64, target: usize) -> f64 {
     if range <= 0.0 || target == 0 {
         return 1.0;
     }
@@ -141,7 +141,7 @@ fn nice_step(range: f64, target: usize) -> f64 {
     mult * mag
 }
 
-fn fmt_num(v: f64, step: f64) -> String {
+pub(crate) fn fmt_num(v: f64, step: f64) -> String {
     let a = v.abs();
     if a != 0.0 && (a >= 1e6 || a < 1e-4) {
         return format!("{v:.1e}");
@@ -354,7 +354,7 @@ impl Series {
 // colour maps (heatmaps)
 // ---------------------------------------------------------------------------
 
-fn colormap(name: &str, t: f32) -> Rgba {
+pub(crate) fn colormap(name: &str, t: f32) -> Rgba {
     let stops: &[&str] = match name {
         "magma" => &[
             "#000004", "#3b0f70", "#8c2981", "#de4968", "#fe9f6d", "#fcfdbf",
@@ -512,15 +512,15 @@ pub fn render(spec: &serde_json::Value) -> R<Image> {
     cv.into_image()
 }
 
-struct Fig {
-    th: Theme,
-    family: String,
-    base: f32,
-    scale: f32,
+pub(crate) struct Fig {
+    pub(crate) th: Theme,
+    pub(crate) family: String,
+    pub(crate) base: f32,
+    pub(crate) scale: f32,
 }
 
 impl Fig {
-    fn style(&self, size: f32, weight: u16, fill: Rgba) -> TextStyle {
+    pub(crate) fn style(&self, size: f32, weight: u16, fill: Rgba) -> TextStyle {
         TextStyle {
             size,
             family: self.family.clone(),
@@ -530,11 +530,16 @@ impl Fig {
         }
     }
 
-    fn stroke(&self, width: f32, dash: Option<&[f32]>) -> Stroke {
+    pub(crate) fn stroke(&self, width: f32, dash: Option<&[f32]>) -> Stroke {
         Canvas::stroke(width * self.scale, dash, LineCap::Round, LineJoin::Round)
     }
 
     fn panel(&self, cv: &mut Canvas, p: &serde_json::Value, outer: Rect) -> R<()> {
+        // A 3-D panel owns its own projection, panes and painter's-algorithm
+        // draw order, so it never touches the 2-D axis machinery below.
+        if js(p, "projection") == Some("3d") {
+            return crate::plot3d::panel(self, cv, p, outer);
+        }
         let th = &self.th;
         let s = self.scale;
         let base = self.base;
