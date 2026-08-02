@@ -22,6 +22,7 @@ use crate::office::{
 use crate::util::{R, err};
 
 const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 const P_NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -83,7 +84,7 @@ fn sp_tree_head() -> String {
 }
 
 /// `<a:srgbClr>` with an optional alpha child (`alpha` is 0..1).
-fn srgb(hex: &str, alpha: Option<f64>) -> String {
+pub(crate) fn srgb(hex: &str, alpha: Option<f64>) -> String {
     match alpha {
         Some(a) if a < 1.0 => format!(
             r#"<a:srgbClr val="{hex}"><a:alpha val="{}"/></a:srgbClr>"#,
@@ -95,7 +96,7 @@ fn srgb(hex: &str, alpha: Option<f64>) -> String {
 
 /// Fill spec → DrawingML. Accepts a bare colour, `{"type":"none"}`,
 /// `{"type":"solid","color":…,"alpha":…}` or a gradient with stops.
-fn fill_xml(v: Option<&Value>) -> String {
+pub(crate) fn fill_xml(v: Option<&Value>) -> String {
     let Some(v) = v.filter(|v| !v.is_null()) else {
         return String::new();
     };
@@ -138,7 +139,7 @@ fn fill_xml(v: Option<&Value>) -> String {
 }
 
 /// Outline spec → `<a:ln>`.
-fn line_xml(v: Option<&Value>) -> String {
+pub(crate) fn line_xml(v: Option<&Value>) -> String {
     let Some(v) = v.filter(|v| !v.is_null()) else {
         return String::new();
     };
@@ -501,7 +502,9 @@ fn pic_xml(sp: &Value, id: i64, rid: &str) -> String {
         .map(esc)
         .unwrap_or_else(|| format!("Picture {id}"));
     let crop = sp
-        .get("crop")
+        .get("image")
+        .and_then(|im| im.get("crop"))
+        .or_else(|| sp.get("crop"))
         .filter(|c| !c.is_null())
         .map(|c| {
             let g = |k: &str| (f(c, k).unwrap_or(0.0) * 100_000.0).round() as i64;
@@ -622,7 +625,13 @@ fn table_xml(sp: &Value, id: i64, rels: &mut Rels) -> R<String> {
 }
 
 /// Render one shape, staging any media it needs.
-fn shape_xml(sp: &Value, id: i64, rels: &mut Rels, media: &mut Media) -> R<String> {
+fn shape_xml(
+    sp: &Value,
+    id: i64,
+    rels: &mut Rels,
+    media: &mut Media,
+    charts: &mut Vec<String>,
+) -> R<String> {
     let kind = s(sp, "kind")
         .or_else(|| s(sp, "type"))
         .unwrap_or(if sp.get("image").is_some() {
@@ -641,6 +650,20 @@ fn shape_xml(sp: &Value, id: i64, rels: &mut Rels, media: &mut Media) -> R<Strin
             Ok(pic_xml(sp, id, &rid))
         }
         "table" => table_xml(sp, id, rels),
+        "chart" | "graph" => {
+            // The chart lives in its own part; the slide only points at it.
+            charts.push(crate::chart::chart_xml(sp.get("chart").unwrap_or(sp)));
+            let n = charts.len();
+            let rid = rels.add("chart", &format!("../charts/chart{n}.xml"));
+            let name = s(sp, "name")
+                .map(esc)
+                .unwrap_or_else(|| format!("Chart {id}"));
+            Ok(format!(
+                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="{name}"/><p:cNvGraphicFramePr/>{}</p:nvGraphicFramePr>{}<a:graphic><a:graphicData uri="{C_NS}"><c:chart xmlns:c="{C_NS}" xmlns:r="{R_NS}" r:id="{rid}"/></a:graphicData></a:graphic></p:graphicFrame>"#,
+                nv_pr(sp),
+                xfrm_xml(sp, "p:xfrm")
+            ))
+        }
         "connector" | "line" => {
             let name = s(sp, "name")
                 .map(esc)
@@ -666,7 +689,7 @@ fn shape_xml(sp: &Value, id: i64, rels: &mut Rels, media: &mut Media) -> R<Strin
             let name = s(sp, "name")
                 .map(esc)
                 .unwrap_or_else(|| format!("Shape {id}"));
-            let txbox = if kind == "textbox" {
+            let txbox = if kind == "textbox" && sp.get("ph").is_none() {
                 r#" txBox="1""#
             } else {
                 ""
@@ -906,6 +929,7 @@ pub fn build(spec: &Value) -> R<Vec<u8>> {
 
     let mut pack = Pack::new();
     let mut media = Media::new();
+    let mut charts: Vec<String> = Vec::new(); // one `ppt/charts/chartN.xml` each
     let mut ct_over = String::new(); // [Content_Types] overrides
     let has_notes = slides
         .iter()
@@ -970,7 +994,7 @@ pub fn build(spec: &Value) -> R<Vec<u8>> {
         let mut id = 1;
         for sp in arr(sl, "shapes") {
             id += 1;
-            tree.push_str(&shape_xml(sp, id, &mut rels, &mut media)?);
+            tree.push_str(&shape_xml(sp, id, &mut rels, &mut media, &mut charts)?);
         }
         let bg = sl
             .get("background")
@@ -1027,6 +1051,12 @@ pub fn build(spec: &Value) -> R<Vec<u8>> {
         pack.xml("ppt/theme/theme2.xml", &theme_xml("Office Theme"))?;
         ct_over.push_str(&over("/ppt/notesMasters/notesMaster1.xml", "notesMaster"));
         ct_over.push_str(&over("/ppt/theme/theme2.xml", "theme"));
+    }
+
+    // ---- charts --------------------------------------------------------------
+    for (n, body) in charts.iter().enumerate() {
+        pack.xml(&format!("ppt/charts/chart{}.xml", n + 1), body)?;
+        ct_over.push_str(&over(&format!("/ppt/charts/chart{}.xml", n + 1), "chart"));
     }
 
     // ---- media -------------------------------------------------------------
@@ -1144,6 +1174,7 @@ fn over(part: &str, kind: &str) -> String {
         "tableStyles" => {
             "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"
         }
+        "chart" => "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
         "theme" => "application/vnd.openxmlformats-officedocument.theme+xml",
         "coreProps" => "application/vnd.openxmlformats-package.core-properties+xml",
         _ => "application/vnd.openxmlformats-officedocument.extended-properties+xml",

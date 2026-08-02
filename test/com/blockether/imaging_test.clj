@@ -818,3 +818,61 @@
       (is (= :probe-video (:op (ex-data e))))
       (is (string? (ex-message e)))
       (is (not (str/blank? (ex-message e)))))))
+
+(deftest office-build-and-read-round-trips
+  (testing "xlsx values, formulae and sheet metadata"
+    (let [data (img/xlsx {:properties {:title "Quarterly"}
+                          :sheets [{:name "Summary"
+                                    :freeze {:row 1 :col 1}
+                                    :cells [{:row 0 :col 0 :value "Quarter"}
+                                            {:row 1 :col 0 :value "Q1"}
+                                            {:row 1 :col 1 :value 42}
+                                            {:row 2 :col 1 :formula "SUM(B2:B2)"}]}]})
+          out (img/read-office data)]
+      (is (= "workbook" (:kind out)))
+      (is (= "Summary" (get-in out [:sheets 0 :name])))
+      (is (= 42.0 (get-in out [:sheets 0 :rows 1 1])))))
+  (testing "docx paragraphs and tables"
+    (let [data (img/docx {:properties {:title "Memo"}
+                          :blocks [{:type :heading :level 1 :text "Status"}
+                                   {:type :paragraph :text "All green"}
+                                   {:type :table :rows [["A" "B"] ["1" "2"]]}]})
+          out (img/read-office data)]
+      (is (= "document" (:kind out)))
+      (is (some #{"Status"} (:paragraphs out)))
+      (is (some #{"All green"} (:paragraphs out)))))
+  (testing "pptx rich shapes, notes and charts survive native read/write"
+    (let [spec {:width 12192000
+                :height 6858000
+                :properties {:title "Native deck" :author "Vis"}
+                :slides [{:layout "Blank"
+                          :notes "Speaker notes"
+                          :shapes [{:kind :textbox :left 100000 :top 100000
+                                    :width 2000000 :height 500000
+                                    :text-frame {:paragraphs [{:runs [{:text "Rust PPTX"
+                                                                       :bold true
+                                                                       :color "3366FF"}]}]}}
+                                   {:kind :table :left 100000 :top 800000
+                                    :width 3000000 :height 1000000
+                                    :table {:col-widths [1500000 1500000]
+                                            :rows [{:cells [{:text "A"} {:text "B"}]}
+                                                   {:cells [{:text "1"} {:text "2"}]}]}}
+                                   {:kind :chart :left 3400000 :top 800000
+                                    :width 4500000 :height 3000000
+                                    :chart {:type :column :title "Revenue"
+                                            :categories ["Q1" "Q2"]
+                                            :legend {:position :bottom}
+                                            :series [{:name "Sales" :values [3 7]
+                                                      :fill "4472C4"}]}}]}]}
+          bytes (img/pptx spec)
+          out (img/read-office bytes {:with-images true})
+          shapes (get-in out [:slides 0 :shapes])
+          chart (:chart (first (filter #(= "chart" (:kind %)) shapes)))]
+      (is (> (alength ^bytes bytes) 1000))
+      (is (= "presentation" (:kind out)))
+      (is (= "Native deck" (get-in out [:properties :title])))
+      (is (= "Speaker notes" (get-in out [:slides 0 :notes])))
+      (is (= #{"textbox" "table" "chart"} (set (map :kind shapes))))
+      (is (= ["Q1" "Q2"] (:categories chart)))
+      (is (= [3.0 7.0] (get-in chart [:series 0 :values])))
+      (is (= "Revenue" (:title chart))))))

@@ -175,6 +175,11 @@ pub fn parse_color(s: &str) -> R<Rgba> {
     if let Some(c) = named(&lower) {
         return Ok(c);
     }
+    // OOXML (and plenty of hand-written specs) spell colours bare: `RRGGBB`.
+    // Named colours win, so this only sees strings that are pure hex digits.
+    if matches!(s.len(), 3 | 4 | 6 | 8) && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return parse_color(&format!("#{s}"));
+    }
     if let Some(rest) = lower
         .strip_prefix("rgba(")
         .or_else(|| lower.strip_prefix("rgb("))

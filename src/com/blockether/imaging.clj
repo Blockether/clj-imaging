@@ -873,13 +873,23 @@
                 :placeholders [{:type :ctrTitle :idx 0
                                 :left :top :width :height :size :align}]}]
      :slides [{:layout 0 :background \"#ffffff\" :notes \"…\"
-               :shapes [{:kind :textbox|:auto|:picture|:table|:connector
+               :shapes [{:kind :textbox|:auto|:picture|:table|:chart|:connector
                          :left :top :width :height :rotation
                          :preset :roundRect :fill \"#3366cc\" :line {:color :width}
-                         :image {:data <bytes>}
+                         :image {:data <bytes> :crop {:left :top :right :bottom}}
+                         :chart {:type :column :title \"Revenue\"
+                                 :categories [\"Q1\" \"Q2\"]
+                                 :legend {:position :bottom}
+                                 :series [{:name \"Sales\" :values [3 7]
+                                           :fill \"4472C4\"}]}
                          :text-frame {:paragraphs [{:align :level :bullet
                                                     :runs [{:text \"hi\" :bold true
                                                             :size 1800}]}]}}]}]}`
+
+   A chart `:type` is one of `:column :bar :line :area :pie :doughnut :radar
+   :scatter :bubble` plus the `*-stacked` / `*-percent-stacked` variants. Each
+   chart becomes its own `ppt/charts/chartN.xml` part, so PowerPoint and
+   `python-pptx` see a real chart rather than a picture of one.
 
    Lengths are EMU (`914400` per inch), font sizes centipoints (`1800` = 18 pt) —
    exactly how `python-pptx` normalises its own `Length`/`Pt` values."
@@ -888,11 +898,22 @@
 (defn read-office
   "Read an Office document back. Workbooks (`.xlsx` `.xlsm` `.xlsb` `.xls`
    `.ods`) come back as `{:kind :sheets [{:name :rows [[cell …] …]}]}` with cells
-   already coerced to strings/numbers/booleans; `.docx` and `.pptx` come back as
-   `{:kind :text :paragraphs [...]}` (pptx also `:slides`).
+   already coerced to strings/numbers/booleans; `.docx` comes back as
+   `{:kind :paragraphs [...]}`.
+
+   A `.pptx` is read back as the mirror image of what `pptx` writes — the whole
+   DrawingML shape tree, not just its text:
+
+   `{:kind :width :height :properties
+     :slides [{:name :index :layout :notes :paragraphs
+               :shapes [{:kind :name :left :top :width :height :rotation
+                         :text-frame {…} :table {…} :chart {…} :image {…}}]}]}`
+
+   so a deck can be read, edited and written again without losing its shapes.
 
    Options: `:sheet` (name or index — read just that one), `:header` (treat the
-   first row as keys and return maps), `:max-rows`."
+   first row as keys and return maps), `:max-rows`, and `:with-images` (base64
+   every embedded picture of a presentation; off by default)."
   ([data] (read-office data nil))
   ([data opts]
    (with-open [arena (Arena/ofConfined)]

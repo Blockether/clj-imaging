@@ -217,7 +217,7 @@ pub const RELS_OPEN: &str =
 pub fn read(data: &[u8], opts: &Value) -> R<Value> {
     match kind_of(data) {
         Kind::Word => read_word(data),
-        Kind::Slides => read_slides(data),
+        Kind::Slides => crate::slides_read::read(data, opts),
         Kind::Sheet => read_sheets(data, opts),
     }
 }
@@ -299,38 +299,6 @@ fn read_sheets(data: &[u8], opts: &Value) -> R<Value> {
 fn read_word(data: &[u8]) -> R<Value> {
     let xml = part(data, "word/document.xml")?;
     Ok(serde_json::json!({"kind": "document", "paragraphs": paragraph_texts(&xml, "w:p", "w:t")}))
-}
-
-/// Every `<a:t>` per slide, in slide order.
-fn read_slides(data: &[u8]) -> R<Value> {
-    let mut z = zip::ZipArchive::new(Cursor::new(data.to_vec()))
-        .map_err(|e| format!("not a package: {e}"))?;
-    let mut names: Vec<String> = (0..z.len())
-        .filter_map(|i| z.by_index(i).ok().map(|f| f.name().to_string()))
-        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
-        .collect();
-    names.sort_by_key(|n| {
-        n.trim_start_matches("ppt/slides/slide")
-            .trim_end_matches(".xml")
-            .parse::<u32>()
-            .unwrap_or(0)
-    });
-    let mut slides = Vec::new();
-    for n in names {
-        let mut f = z
-            .by_name(&n)
-            .map_err(|e| format!("reading {n}: {e}"))
-            .map_err(|e| e.to_string())?;
-        let mut buf = String::new();
-        use std::io::Read;
-        f.read_to_string(&mut buf)
-            .map_err(|e| format!("reading {n}: {e}"))?;
-        slides.push(serde_json::json!({
-            "name": n,
-            "paragraphs": paragraph_texts(&buf, "a:p", "a:t"),
-        }));
-    }
-    Ok(serde_json::json!({"kind": "presentation", "slides": slides}))
 }
 
 fn part(data: &[u8], name: &str) -> R<String> {

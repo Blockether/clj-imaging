@@ -17,6 +17,7 @@
 //!     into a failure with the panic message as the error.
 
 mod canvas;
+mod chart;
 mod docx;
 mod filter;
 mod imgops;
@@ -25,6 +26,9 @@ mod optimize;
 mod plot;
 mod plot3d;
 mod pptx;
+
+mod slides_read;
+
 mod quant;
 mod svg;
 mod text;
