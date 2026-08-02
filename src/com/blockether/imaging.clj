@@ -907,6 +907,7 @@
    `{:kind :width :height :properties
      :slides [{:name :index :layout :notes :paragraphs
                :shapes [{:kind :name :left :top :width :height :rotation
+                         :fill {…} :line {…}
                          :text-frame {…} :table {…} :chart {…} :image {…}}]}]}`
 
    so a deck can be read, edited and written again without losing its shapes.

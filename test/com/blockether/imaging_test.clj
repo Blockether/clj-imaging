@@ -876,3 +876,33 @@
       (is (= ["Q1" "Q2"] (:categories chart)))
       (is (= [3.0 7.0] (get-in chart [:series 0 :values])))
       (is (= "Revenue" (:title chart))))))
+
+(deftest pptx-fill-and-line-survive-the-read-back
+  (testing "spPr fill/outline come back as the very spec `pptx` was given"
+    (let [spec {:slides [{:layout "Blank"
+                          :shapes [{:kind :auto :preset "rect"
+                                    :left 100000 :top 100000
+                                    :width 2000000 :height 500000
+                                    :fill {:type :solid :color "112233"}
+                                    :line {:color "0000FF" :width 25400 :dash "dash"}}
+                                   {:kind :auto :preset "ellipse"
+                                    :left 100000 :top 900000
+                                    :width 2000000 :height 500000
+                                    :fill {:type :gradient :angle 90
+                                           :stops [{:position 0 :color "FF0000"}
+                                                   {:position 1 :color "0000FF"}]}}
+                                   {:kind :auto :preset "rect"
+                                    :left 100000 :top 1700000
+                                    :width 2000000 :height 500000
+                                    :fill {:type :none}
+                                    :line {:type :none}}]}]}
+          shapes (get-in (img/read-office (img/pptx spec)) [:slides 0 :shapes])
+          [solid grad bare] shapes]
+      (is (= {:type "solid" :color "112233"} (:fill solid)))
+      (is (= {:color "0000FF" :width 25400 :dash "dash"} (:line solid)))
+      (is (= "gradient" (get-in grad [:fill :type])))
+      (is (= 90.0 (get-in grad [:fill :angle])))
+      (is (= ["FF0000" "0000FF"] (mapv :color (get-in grad [:fill :stops]))))
+      (is (= [0.0 1.0] (mapv :position (get-in grad [:fill :stops]))))
+      (is (= {:type "none"} (:fill bare)))
+      (is (= {:type "none"} (:line bare))))))

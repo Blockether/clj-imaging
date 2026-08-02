@@ -464,6 +464,90 @@ fn table_of(tbl: &Node) -> Value {
     Value::Object(m)
 }
 
+/// `<a:srgbClr val="RRGGBB"><a:alpha val="…"/></a:srgbClr>` → `(hex, alpha)`.
+fn srgb_of(n: &Node) -> Option<(String, Option<f64>)> {
+    let c = n.kid("a:srgbClr")?;
+    let hex = c.attr("val")?.to_string();
+    let alpha = c
+        .kid("a:alpha")
+        .and_then(|a| a.num("val"))
+        .map(|v| v as f64 / 100_000.0);
+    Some((hex, alpha))
+}
+
+/// A `<p:spPr>` fill → exactly the spec [`crate::pptx::fill_xml`] writes, so a
+/// deck that is read, edited and saved keeps the fill it came in with.
+fn fill_of(sp: &Node) -> Option<Value> {
+    let mut m = Map::new();
+    if sp.kid("a:noFill").is_some() {
+        m.insert("type".into(), Value::from("none"));
+    } else if let Some(g) = sp.kid("a:gradFill") {
+        let mut nodes = Vec::new();
+        g.find_all("a:gs", &mut nodes);
+        let mut stops = Vec::new();
+        for st in nodes {
+            let mut sm = Map::new();
+            if let Some(p) = st.num("pos") {
+                sm.insert("position".into(), Value::from(p as f64 / 100_000.0));
+            }
+            if let Some((hex, alpha)) = srgb_of(st) {
+                sm.insert("color".into(), Value::from(hex));
+                put(
+                    &mut sm,
+                    "alpha",
+                    alpha.map(Value::from).unwrap_or(Value::Null),
+                );
+            }
+            stops.push(Value::Object(sm));
+        }
+        if stops.is_empty() {
+            return None;
+        }
+        m.insert("type".into(), Value::from("gradient"));
+        m.insert("stops".into(), Value::Array(stops));
+        if let Some(a) = g.find("a:lin").and_then(|l| l.num("ang")) {
+            m.insert("angle".into(), Value::from(a as f64 / 60_000.0));
+        }
+    } else {
+        let (hex, alpha) = srgb_of(sp.kid("a:solidFill")?)?;
+        m.insert("type".into(), Value::from("solid"));
+        m.insert("color".into(), Value::from(hex));
+        put(
+            &mut m,
+            "alpha",
+            alpha.map(Value::from).unwrap_or(Value::Null),
+        );
+    }
+    Some(Value::Object(m))
+}
+
+/// A `<p:spPr>` outline → the spec [`crate::pptx::line_xml`] writes.
+fn line_of(sp: &Node) -> Option<Value> {
+    let ln = sp.kid("a:ln")?;
+    let mut m = Map::new();
+    if let Some(w) = ln.num("w") {
+        m.insert("width".into(), Value::from(w));
+    }
+    if ln.kid("a:noFill").is_some() {
+        m.insert("type".into(), Value::from("none"));
+    } else if let Some((hex, alpha)) = ln.kid("a:solidFill").and_then(srgb_of) {
+        m.insert("color".into(), Value::from(hex));
+        put(
+            &mut m,
+            "alpha",
+            alpha.map(Value::from).unwrap_or(Value::Null),
+        );
+    }
+    if let Some(d) = ln.kid("a:prstDash").and_then(|d| d.attr("val")) {
+        m.insert("dash".into(), Value::from(d));
+    }
+    if m.is_empty() {
+        None
+    } else {
+        Some(Value::Object(m))
+    }
+}
+
 /// One member of a `<p:spTree>`.
 fn shape_of(n: &Node, rels: &[(String, String)], z: &mut Zip, with_images: bool) -> Option<Value> {
     let mut m = Map::new();
@@ -511,6 +595,10 @@ fn shape_of(n: &Node, rels: &[(String, String)], z: &mut Zip, with_images: bool)
         m.insert("ph".into(), Value::Object(p));
     }
     geometry(n, &mut m);
+    if let Some(sp) = n.kid("p:spPr") {
+        put(&mut m, "fill", fill_of(sp).unwrap_or(Value::Null));
+        put(&mut m, "line", line_of(sp).unwrap_or(Value::Null));
+    }
     match n.tag.as_str() {
         "p:sp" => {
             let preset = n.find("a:prstGeom").and_then(|g| g.attr("prst"));
