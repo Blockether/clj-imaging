@@ -55,6 +55,11 @@ rust_h264 = { path = "../vendor/rust_h264", version = "0.4" }
 # extras; the codec crates it does pull (zip, flate2, quick-xml, calamine) are
 # already in this tree.
 anydoc = "0.1.3"
+# The PDF half of `anydoc`, used DIRECTLY for one thing anydoc's own API
+# cannot express: per-PAGE extraction. A PDF has no document model, so the
+# page a hit sits on only exists in `extract_pages_markdown_mem`. Same crate
+# and same version anydoc already resolves, so this costs no extra build.
+pdf-inspector = "0.1.7"
 
 [profile.release]
 lto = true

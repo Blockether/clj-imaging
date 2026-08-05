@@ -920,6 +920,7 @@ dependencies = [
  "image",
  "jpeg-encoder",
  "oxipng",
+ "pdf-inspector",
  "quick-xml",
  "re_mp4",
  "resvg",

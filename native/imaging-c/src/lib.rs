@@ -19,6 +19,7 @@
 mod canvas;
 mod chart;
 mod doc;
+mod doc_blocks;
 mod docx;
 mod filter;
 mod imgops;

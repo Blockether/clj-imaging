@@ -959,3 +959,114 @@
     (is (thrown? clojure.lang.ExceptionInfo (img/document->markdown (byte-array 32))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (img/document->markdown (byte-array 32) {:format :quattro-pro})))))
+
+(defn- pdf-bytes
+  "The smallest real PDF that carries text: one uncompressed content stream per
+   page, Helvetica, a correct xref. Handwritten because nothing in this library
+   WRITES PDFs and page provenance can only be proved against a document that
+   actually has pages."
+  ^bytes [pages]
+  (let [n (count pages)
+        page-ids (mapv #(+ 3 (* 2 %)) (range n))
+        cont-ids (mapv #(+ 4 (* 2 %)) (range n))
+        font-id (+ 3 (* 2 n))
+        stream (fn [lines]
+                 (str "BT /F1 12 Tf 72 720 Td 16 TL\n"
+                      (str/join "\n" (for [l lines]
+                                       (str "(" (str/escape l {\\ "\\\\" \( "\\(" \) "\\)"}) ") Tj T*")))
+                      "\nET"))
+        objs (into (sorted-map)
+                   (concat
+                    [[1 "<< /Type /Catalog /Pages 2 0 R >>"]
+                     [2 (str "<< /Type /Pages /Kids ["
+                             (str/join " " (map #(str % " 0 R") page-ids))
+                             "] /Count " n " >>")]
+                     [font-id "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]]
+                    (for [i (range n)]
+                      [(page-ids i)
+                       (str "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents "
+                            (cont-ids i) " 0 R /Resources << /Font << /F1 " font-id " 0 R >> >> >>")])
+                    (for [i (range n)
+                          :let [s (stream (nth pages i))]]
+                      [(cont-ids i)
+                       (str "<< /Length " (count s) " >>\nstream\n" s "\nendstream")])))
+        out (java.io.ByteArrayOutputStream.)
+        put! (fn [^String s] (.write out (.getBytes s "ISO-8859-1")))
+        _ (put! "%PDF-1.4\n")
+        offsets (reduce (fn [acc [num body]]
+                          (let [at (.size out)]
+                            (put! (str num " 0 obj\n" body "\nendobj\n"))
+                            (assoc acc num at)))
+                        {}
+                        objs)
+        xref-at (.size out)
+        size (inc (apply max (keys objs)))]
+    (put! (str "xref\n0 " size "\n0000000000 65535 f \n"))
+    (doseq [num (range 1 size)]
+      (put! (if-let [at (offsets num)]
+              (format "%010d 00000 n \n" at)
+              "0000000000 65535 f \n")))
+    (put! (str "trailer\n<< /Size " size " /Root 1 0 R >>\nstartxref\n" xref-at "\n%%EOF\n"))
+    (.toByteArray out)))
+
+(deftest a-document-reports-its-own-structure
+  (testing "`:blocks` turns a rendering back into a document: plain text, spans, sections"
+    (let [doc (img/docx
+               {:blocks [{:type :heading :level 1 :text "Quarterly Report"}
+                         {:type :paragraph :text "Revenue in March 2024 rose."}
+                         {:type :heading :level 2 :text "Regions"}
+                         {:type :paragraph
+                          :runs [{:text "The "} {:text "mar" :italic true} {:text "ket closed early."}]}
+                         {:type :table :header true
+                          :rows [{:cells [{:text "Month"} {:text "Revenue"}]}
+                                 {:cells [{:text "March"} {:text "12.4"}]}]}]})
+          {:keys [markdown text blocks pages]} (img/read-document doc {:blocks true})
+          by-kind (group-by :kind blocks)]
+      (is (nil? pages) "only a PDF has pages")
+      (is (str/includes? markdown "# **Quarterly Report**") "the Markdown still carries its emphasis")
+      (is (not (str/includes? text "**")) "the plain text carries none of it")
+      (is (str/includes? text "The market closed early.")
+          "a style boundary INSIDE a word does not split the word in the plain text")
+
+      (testing "every span points back at the text it came from"
+        (doseq [{:keys [text' start end line] :as b} (map #(assoc % :text' (:text %)) blocks)]
+          (is (= text' (subs text start end)) (str "block " (:index b) " span"))
+          (is (= line (inc (count (filter #{\newline} (subs text 0 start)))))
+              (str "block " (:index b) " line"))))
+
+      (testing "headings carry their level, everything below carries its section"
+        (is (= [1 2] (mapv :level (by-kind "heading"))))
+        (is (= [] (:path (first blocks))) "a top heading sits under nothing")
+        (is (= ["Quarterly Report" "Regions"]
+               (:path (first (filter #(= "The market closed early." (:text %)) blocks))))
+            "a paragraph knows the breadcrumb of headings above it"))
+
+      (testing "a table row is one block, and its cells are addressable"
+        (let [rows (by-kind "table-row")
+              body (first (remove :is-header rows))]
+          (is (= 2 (count rows)))
+          (is (true? (:is-header (first rows))))
+          (is (= "March | 12.4" (:text body)) "the whole row is one searchable passage")
+          (is (= [{:column 0 :name "Month" :text "March"} {:column 1 :name "Revenue" :text "12.4"}]
+                 (mapv #(select-keys % [:column :name :text]) (:cells body)))
+              "each cell names the header column it sits under")
+          (is (= "12.4" (subs text (:start (second (:cells body))) (:end (second (:cells body)))))
+              "a cell's span is absolute, into the document's own text")))))
+
+  (testing "a PDF reports the PAGE every block sits on"
+    (let [pdf (pdf-bytes [["Quarterly Report" "Revenue in March 2024 rose sharply."]
+                          ["Regional Detail" "April was quieter than March."]])
+          {:keys [format pages blocks text]} (img/read-document pdf {:blocks true})]
+      (is (= :pdf format))
+      (is (= 2 pages))
+      (is (= [1 2] (distinct (map :page blocks))) "blocks are stamped with their page")
+      (is (str/includes? (:text (first (filter #(= 2 (:page %)) blocks))) "April")
+          "page 2's text is on page 2")
+      (doseq [{:keys [start end] :as b} blocks]
+        (is (= (:text b) (subs text start end)) "a PDF block's span points back too"))))
+
+  (testing "no `:blocks` option, no structure — the old shape is untouched"
+    (let [r (img/read-document (.getBytes "a,b\n1,2\n" "UTF-8") {:format :csv})]
+      (is (contains? r :markdown))
+      (is (not (contains? r :blocks)))
+      (is (not (contains? r :text))))))

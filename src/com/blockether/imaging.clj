@@ -958,7 +958,8 @@
 
 (defn read-document
   "Convert ANY document a human sent into GitHub-Flavored Markdown:
-   `{:format :source :chars :markdown :assets}`.
+   `{:format :source :chars :markdown :assets}`, and with `:blocks` the
+   STRUCTURE behind that Markdown too.
 
    Word (`.doc` `.docx` `.odt` `.rtf`), PDF, EPUB, presentations (`.ppt`
    `.pptx` `.odp`) and spreadsheets (`.xls` `.xlsx` `.xlsm` `.xlsb` `.ods`
@@ -970,10 +971,26 @@
    Options: `:format` (force the parser, e.g. `:csv`), `:name` (the file name,
    the only route for signature-less CSV), `:assets` (also return every
    embedded binary as `{:id :media-type :origin-part :size :bytes}` with
-   `:bytes` a `byte[]`), `:max-assets`.
+   `:bytes` a `byte[]`), `:max-assets`, `:blocks`.
 
-   A PDF converts straight to Markdown and has no document model, so it never
-   reports assets."
+   `:blocks true` additionally returns:
+
+   - `:text` — the document as PLAIN text. Same content, none of Markdown's
+     punctuation, so a matcher never trips over `**March**` or a `|`, and an
+     offset means a position in the DOCUMENT rather than in a rendering of it.
+   - `:blocks` — one entry per heading, paragraph, list item, table row, code
+     block and note, in reading order: `{:index :kind :text :start :end :line
+     :path}` where `:start`/`:end` are CHARACTER offsets into `:text`, `:line`
+     is 1-based, and `:path` is the heading breadcrumb the block sits under.
+     A heading adds `:level`/`:anchor`, a list item `:marker`/`:list-depth`/
+     `:checked`, a code block `:lang`, a note `:note`/`:note-kind`, a quoted
+     block `:quote-depth`, and a table row `:row`/`:is-header`/`:cells`, each
+     cell `{:column :name :text :start :end}` — so a hit can be reported as
+     row 4, column Revenue.
+   - `:pages` — the page count for a PDF, nil for everything else.
+
+   A PDF has no document model, so it never reports assets; its blocks come
+   from per-page extraction instead, and every one of them carries `:page`."
   ([data] (read-document data nil))
   ([data opts]
    (let [m (doc-call :doc-markdown data opts)]

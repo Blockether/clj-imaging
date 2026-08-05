@@ -96,13 +96,41 @@ pub fn detect(data: &[u8], opts: &Value) -> R<Value> {
     }))
 }
 
-/// Convert a document to Markdown: `{format source markdown chars assets}`.
+/// Convert a document to Markdown: `{format source markdown chars assets}`,
+/// and — with `blocks` — the STRUCTURE behind that Markdown as well.
 ///
 /// Options: `format` (force the parser), `name` (file name, the fallback for
 /// signature-less CSV), `assets` (also return the embedded binaries, base64),
-/// `max_assets`.
+/// `max_assets`, `blocks` (also return `text` — the document as plain text,
+/// with no Markdown punctuation to trip a matcher — plus one `blocks` entry
+/// per heading, paragraph, list item, table row, code block and note, each
+/// carrying its char span into `text`, its heading breadcrumb, and, for a
+/// PDF, the page it sits on).
 pub fn markdown(data: &[u8], opts: &Value) -> R<Value> {
     let (format, source) = resolve(data, opts)?;
+    let want_blocks = jb(opts, "blocks", false);
+    let want_assets = jb(opts, "assets", false);
+
+    // A PDF has no document model at all (anydoc renders it straight to
+    // Markdown), so its structure comes from `pdf-inspector`'s per-page
+    // extraction — which is also the only place a PAGE NUMBER exists.
+    if want_blocks && format == Format::Pdf {
+        let (md, text, blocks, pages) = crate::doc_blocks::pdf_blocks(data)?;
+        let mut out = json!({
+            "format": format_name(format),
+            "source": source,
+            "chars": md.chars().count(),
+            "markdown": md,
+            "text": text,
+            "blocks": blocks,
+            "pages": pages,
+        });
+        if want_assets {
+            out["assets"] = Value::Array(Vec::new());
+        }
+        return Ok(out);
+    }
+
     let md = anydoc::to_markdown_bytes(data, format).map_err(|e| format!("{e}"))?;
     let mut out = json!({
         "format": format_name(format),
@@ -110,27 +138,33 @@ pub fn markdown(data: &[u8], opts: &Value) -> R<Value> {
         "chars": md.chars().count(),
         "markdown": md,
     });
-    if jb(opts, "assets", false) {
-        out["assets"] = Value::Array(assets(data, format, opts)?);
+    if want_blocks || (want_assets && format != Format::Pdf) {
+        let doc = anydoc::to_document(data, format).map_err(|e| format!("{e}"))?;
+        if want_blocks {
+            let (text, blocks) = crate::doc_blocks::document_blocks(&doc);
+            out["text"] = Value::String(text);
+            out["blocks"] = Value::Array(blocks);
+            out["pages"] = Value::Null;
+        }
+        if want_assets {
+            out["assets"] = Value::Array(assets(&doc, opts));
+        }
+    } else if want_assets {
+        // PDF without `blocks`: no document model, so nothing embedded.
+        out["assets"] = Value::Array(Vec::new());
     }
     Ok(out)
 }
 
 /// The document's embedded binaries, each `{id media-type origin-part size
-/// bytes}` with `bytes` base64. A PDF converts straight to Markdown and has
-/// no document model, so it never reports assets.
-fn assets(data: &[u8], format: Format, opts: &Value) -> R<Vec<Value>> {
-    if format == Format::Pdf {
-        return Ok(Vec::new());
-    }
-    let doc = anydoc::to_document(data, format).map_err(|e| format!("{e}"))?;
+/// bytes}` with `bytes` base64.
+fn assets(doc: &anydoc::model::Document, opts: &Value) -> Vec<Value> {
     let max = opts
         .get("max_assets")
         .and_then(Value::as_u64)
         .unwrap_or(u64::MAX)
         .min(usize::MAX as u64) as usize;
-    Ok(doc
-        .assets
+    doc.assets
         .iter()
         .take(max)
         .map(|a| {
@@ -142,5 +176,5 @@ fn assets(data: &[u8], format: Format, opts: &Value) -> R<Vec<Value>> {
                 "bytes": base64::engine::general_purpose::STANDARD.encode(&a.bytes),
             })
         })
-        .collect())
+        .collect()
 }

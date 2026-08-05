@@ -89,6 +89,29 @@ The format is taken from the container's own signature first (a signature cannot
 extension routinely does), then from `:name`, and `:format` overrides both. A PDF converts
 straight to Markdown and has no document model, so it never reports `:assets`.
 
+`:blocks true` returns the document's own STRUCTURE next to the rendering, which is what a
+search over documents actually needs:
+
+```clojure
+(img/read-document (io/file "report.docx") {:blocks true})
+;; => {:format :docx :markdown "# **Q1**\n\n…"
+;;     :text   "Q1\n\nRevenue in March 2024 rose.\n\nMonth | Revenue\n\nMarch | 12.4"
+;;     :pages  nil
+;;     :blocks [{:index 0 :kind "heading" :level 1 :text "Q1" :start 0 :end 2 :line 1 :path []}
+;;              {:index 1 :kind "paragraph" :text "Revenue in March 2024 rose."
+;;               :start 4 :end 31 :line 3 :path ["Q1"]}
+;;              {:index 2 :kind "table-row" :row 0 :is-header true :text "Month | Revenue"
+;;               :cells [{:column 0 :name "Month" :text "Month" :start 33 :end 38} …]}]}
+```
+
+`:text` is the document as plain text — same content, none of Markdown's punctuation — so
+`**March**` is just `March` and a matcher never has to know it was emphasised. Every block
+carries a character span into it, the 1-based line it starts on, and the heading breadcrumb
+it sits under; table rows carry their cells, each naming the header column above it. A PDF
+has no document model at all, so its blocks come from `pdf-inspector`'s per-page extraction
+and every one of them carries the `:page` it sits on (with `:pages` the page count) — the
+one provenance a PDF can give that a rendering cannot.
+
 ### Video (MP4 / H.264)
 
 ```clojure
