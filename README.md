@@ -5,7 +5,8 @@ Images, SVG rasterization and plotting for Clojure — **without `java.desktop`*
 `com.blockether/imaging` is a thin Clojure FFM (Java 22+ `java.lang.foreign`) binding over a
 small Rust cdylib built on [`image`](https://crates.io/crates/image),
 [`resvg`/`usvg`](https://crates.io/crates/resvg), [`tiny-skia`](https://crates.io/crates/tiny-skia),
-[`re_mp4`](https://crates.io/crates/re_mp4) and [`rust_h264`](https://crates.io/crates/rust_h264).
+[`re_mp4`](https://crates.io/crates/re_mp4), [`rust_h264`](https://crates.io/crates/rust_h264) and
+[`anydoc`](https://crates.io/crates/anydoc).
 
 Why: AWT / Java2D / ImageIO drag the whole `java.desktop` module and its JNI surface into a
 GraalVM native image. This library replaces that with one self-contained native library, so
@@ -16,6 +17,7 @@ decoding, drawing, text, SVG and charts all work in a native binary with nothing
 * Four Noto faces embedded (sans, sans-bold, sans-italic, mono) — no system fonts required
 * A declarative plotting DSL (lines, areas, steps, bars, hbars, stacked bars, scatter, histogram, pie, donut, heatmap)
 * **MP4 video**: demux + H.264 decode to frames, or transcode straight to an animated GIF — no `ffmpeg`, no system codec
+* **Any document → Markdown**: `.doc` `.docx` `.odt` `.rtf` `.pdf` `.epub` `.ppt` `.pptx` `.odp` `.xls*` `.ods` `.csv` — no headless office suite, no Java
 * No AWT, no ImageIO, no `BufferedImage`, no service loaders
 
 ## Install
@@ -62,6 +64,30 @@ Requires JDK 22+ (FFM). Run with `--enable-native-access=ALL-UNNAMED` to silence
 
 Every op is a map with `:op`; batch style keys (`:fill` `:stroke` `:stroke-width` `:size`
 `:family` `:weight` `:italic`) can be set per batch or per op. WebP encoding is lossless.
+
+### Documents → Markdown
+
+```clojure
+(img/document->markdown (io/file "contract.pdf"))     ;; => "# Contract\n\n…"
+(img/document->markdown csv-bytes {:name "q.csv"})    ;; CSV has no signature; name it
+
+(img/document-format (io/file "deck.pptx"))
+;; => {:format :pptx :source "content" :formats ["doc" "docx" … "csv"]}
+
+(img/read-document (io/file "report.docx") {:assets true})
+;; => {:format :docx :source "content" :chars 4213 :markdown "…"
+;;     :assets [{:id 0 :media-type "image/png" :origin-part "word/media/image1.png"
+;;               :size 154 :bytes #object["[B"]}]}
+```
+
+Word, PDF, EPUB, presentations, spreadsheets and CSV all come back as one GitHub-Flavored
+Markdown string with their headings, lists, tables and links intact — the shape an LLM can
+actually read. [`anydoc`](https://github.com/firecrawl/anydoc) parses every one of them in
+pure Rust inside the same cdylib: no LibreOffice, no `pandoc`, no subprocess.
+
+The format is taken from the container's own signature first (a signature cannot lie, an
+extension routinely does), then from `:name`, and `:format` overrides both. A PDF converts
+straight to Markdown and has no document model, so it never reports `:assets`.
 
 ### Video (MP4 / H.264)
 

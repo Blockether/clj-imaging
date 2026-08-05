@@ -48,6 +48,13 @@ re_mp4 = "0.5"
 # reference list by POC, which silently corrupts every stream that has more than
 # one reference frame and runs past the frame_num wrap. See ../vendor/PATCHES.md.
 rust_h264 = { path = "../vendor/rust_h264", version = "0.4" }
+# Documents -> Markdown. `anydoc` is Firecrawl's pure-Rust document reader: it
+# parses doc/docx/odt/rtf/pdf/ppt/pptx/epub/xlsx/ods/odp/csv itself, with no
+# system library, no Java and no headless office, so it keeps the cdylib's
+# "links against nothing" property. default-features off drops its CLI/logging
+# extras; the codec crates it does pull (zip, flate2, quick-xml, calamine) are
+# already in this tree.
+anydoc = "0.1.3"
 
 [profile.release]
 lto = true

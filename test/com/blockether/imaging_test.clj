@@ -906,3 +906,56 @@
       (is (= [0.0 1.0] (mapv :position (get-in grad [:fill :stops]))))
       (is (= {:type "none"} (:fill bare)))
       (is (= {:type "none"} (:line bare))))))
+
+(deftest any-document-reads-as-markdown
+  (testing "a Word document keeps its heading, prose and table"
+    (let [data (img/docx {:properties {:title "Memo"}
+                          :blocks [{:type :heading :level 1 :text "Status"}
+                                   {:type :paragraph :text "All green"}
+                                   {:type :table :header true
+                                    :rows [{:cells [{:text "A"} {:text "B"}]}
+                                           {:cells [{:text "1"} {:text "2"}]}]}]})
+          md   (img/document->markdown data)]
+      (is (str/includes? md "Status"))
+      (is (str/includes? md "All green"))
+      (is (str/includes? md "| 1 | 2 |") "the table survives as a GFM table, not as loose text")))
+  (testing "a workbook and a presentation read the same way"
+    (is (str/includes? (img/document->markdown
+                        (img/xlsx {:sheets [{:name "Summary"
+                                             :cells [{:row 0 :col 0 :value "Quarter"}
+                                                     {:row 1 :col 0 :value "Q1"}
+                                                     {:row 1 :col 1 :value 42}]}]}))
+                       "| Q1 | 42 |"))
+    (is (str/includes? (img/document->markdown
+                        (img/pptx {:slides [{:shapes [{:kind :textbox :left 0 :top 0
+                                                       :width 2000000 :height 500000
+                                                       :text-frame {:paragraphs [{:runs [{:text "Rust PPTX"}]}]}}]}]}))
+                       "Rust PPTX")))
+  (testing "CSV carries no signature, so only a name (or an explicit format) reaches it"
+    (let [csv (.getBytes "a,b\n1,2\n")]
+      (is (nil? (:format (img/document-format csv))))
+      (is (= :csv (:format (img/document-format csv {:name "quarter.csv"}))))
+      (is (str/includes? (img/document->markdown csv {:name "quarter.csv"}) "| 1 | 2 |"))
+      (is (str/includes? (img/document->markdown csv {:format :csv}) "| 1 | 2 |"))))
+  (testing "the container's own signature identifies it, and says so"
+    (let [out (img/document-format (img/docx {:blocks [{:type :paragraph :text "hi"}]}))]
+      (is (= :docx (:format out)))
+      (is (= "content" (:source out)))
+      (is (some #{"pdf" "epub" "excel"} (:formats out)))))
+  (testing "embedded binaries come back whole when asked for, and never otherwise"
+    (let [png  (png-bytes)
+          deck (img/pptx {:slides [{:shapes [{:kind :picture :left 0 :top 0
+                                              :width 1000000 :height 750000
+                                              :image {:data (.encodeToString (java.util.Base64/getEncoder) png)}}]}]})
+          out  (img/read-document deck {:assets true})
+          a    (first (:assets out))]
+      (is (nil? (:assets (img/read-document deck))))
+      (is (= 1 (count (:assets out))))
+      (is (= "image/png" (:media-type a)))
+      (is (= (alength png) (:size a)))
+      (is (java.util.Arrays/equals png ^bytes (:bytes a))
+          "the asset is the PNG that went in, not a re-encoding of it")))
+  (testing "an unidentifiable document is an ex-info, not a silent empty string"
+    (is (thrown? clojure.lang.ExceptionInfo (img/document->markdown (byte-array 32))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (img/document->markdown (byte-array 32) {:format :quattro-pro})))))

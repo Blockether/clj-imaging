@@ -105,7 +105,9 @@
                :quantize      [:ptr "imaging_quantize" :ptr :i32 :i32]
                :filter        [:ptr "imaging_filter" :ptr :ptr]
                :office-build  [:ptr "imaging_office_build" :ptr :ptr]
-               :office-read   [:ptr "imaging_office_read" :ptr :i64 :ptr]})))
+               :office-read   [:ptr "imaging_office_read" :ptr :i64 :ptr]
+               :doc-markdown  [:ptr "imaging_doc_markdown" :ptr :i64 :ptr]
+               :doc-detect    [:ptr "imaging_doc_detect" :ptr :i64 :ptr]})))
 
 (declare img? seg)
 
@@ -923,3 +925,63 @@
                                          (json-arg arena opts)))
                    json->)
            (fail! :office-read))))))
+
+;; ---------------------------------------------------------------------------
+;; Public API — any document -> Markdown
+;; ---------------------------------------------------------------------------
+
+(defn- doc-call [op data opts]
+  (with-open [arena (Arena/ofConfined)]
+    (let [^bytes b (->bytes data)]
+      (or (some-> (take-string! (invoke op (alloc-bytes arena b) (long (alength b))
+                                        (json-arg arena (some-> opts
+                                                                (update :format #(some-> % name))))))
+                  json->)
+          (fail! op)))))
+
+(defn document-format
+  "Identify a document WITHOUT converting it: `{:format :source :formats}`.
+
+   `:format` is one of `:doc :docx :odt :pdf :ppt :pptx :rtf :epub :excel :ods
+   :odp :csv`, or nil when nothing recognised the input. `:source` says which
+   evidence won — `\"content\"` (the container's own signature), `\"name\"` (the
+   extension of `:name`) or `\"format\"` (you said so).
+
+   The signature is asked FIRST, because a signature cannot lie and an
+   extension routinely does. CSV carries no signature at all, so a `:name` is
+   its only route.
+
+   Options: `:name` (file name or extension), `:format` (force it)."
+  ([data] (document-format data nil))
+  ([data opts]
+   (update (doc-call :doc-detect data opts) :format #(some-> % keyword))))
+
+(defn read-document
+  "Convert ANY document a human sent into GitHub-Flavored Markdown:
+   `{:format :source :chars :markdown :assets}`.
+
+   Word (`.doc` `.docx` `.odt` `.rtf`), PDF, EPUB, presentations (`.ppt`
+   `.pptx` `.odp`) and spreadsheets (`.xls` `.xlsx` `.xlsm` `.xlsb` `.ods`
+   `.csv`) all come back as one Markdown string, with their headings, lists,
+   tables and links intact — which is what an LLM can actually read. Nothing
+   here shells out to a headless office suite: `anydoc` parses every format in
+   pure Rust inside the cdylib.
+
+   Options: `:format` (force the parser, e.g. `:csv`), `:name` (the file name,
+   the only route for signature-less CSV), `:assets` (also return every
+   embedded binary as `{:id :media-type :origin-part :size :bytes}` with
+   `:bytes` a `byte[]`), `:max-assets`.
+
+   A PDF converts straight to Markdown and has no document model, so it never
+   reports assets."
+  ([data] (read-document data nil))
+  ([data opts]
+   (let [m (doc-call :doc-markdown data opts)]
+     (cond-> (update m :format #(some-> % keyword))
+       (:assets m) (update :assets #(mapv (fn [a] (update a :bytes b64-decode)) %))))))
+
+(defn document->markdown
+  "The Markdown of any document, as a String — `read-document` when all you
+   want is the text. Same options."
+  (^String [data] (document->markdown data nil))
+  (^String [data opts] (:markdown (read-document data opts))))

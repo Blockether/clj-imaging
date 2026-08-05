@@ -18,6 +18,7 @@
 
 mod canvas;
 mod chart;
+mod doc;
 mod docx;
 mod filter;
 mod imgops;
@@ -498,6 +499,46 @@ pub unsafe extern "C" fn imaging_office_read(
         let d = unsafe { bytes(data, len) }?;
         let o = json_arg(opts)?;
         office::read(d, &o)
+    }))
+}
+
+/// Convert ANY document a human sent — `doc`, `docx`, `odt`, `rtf`, `pdf`,
+/// `epub`, `ppt`, `pptx`, `odp`, `xls`/`xlsx`, `ods`, `csv` — to
+/// GitHub-Flavored Markdown: `{format source markdown chars assets}`.
+/// Options JSON: `format` (force the parser), `name` (file name, the only
+/// route for signature-less CSV), `assets` (embedded binaries, base64),
+/// `max_assets`.
+///
+/// # Safety
+/// `data`/`len` must be readable; `opts` a C string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_doc_markdown(
+    data: *const u8,
+    len: u64,
+    opts: *const c_char,
+) -> *mut c_char {
+    json_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        let o = json_arg(opts)?;
+        doc::markdown(d, &o)
+    }))
+}
+
+/// Identify a document without converting it: `{format source formats}`,
+/// `format` null when nothing recognised it. Options JSON: `format`, `name`.
+///
+/// # Safety
+/// `data`/`len` must be readable; `opts` a C string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn imaging_doc_detect(
+    data: *const u8,
+    len: u64,
+    opts: *const c_char,
+) -> *mut c_char {
+    json_out(guard(|| {
+        let d = unsafe { bytes(data, len) }?;
+        let o = json_arg(opts)?;
+        doc::detect(d, &o)
     }))
 }
 
