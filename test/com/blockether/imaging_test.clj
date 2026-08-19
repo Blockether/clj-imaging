@@ -907,6 +907,19 @@
       (is (= {:type "none"} (:fill bare)))
       (is (= {:type "none"} (:line bare))))))
 
+;; Regression: a presentation with no slides came back as
+;; "not a readable workbook: Cannot detect file format" -- `kind_of` recognised a
+;; deck only by `ppt/slides/slide*`, so a freshly created (legally slide-less)
+;; deck fell through to the spreadsheet reader.
+(deftest a-slideless-deck-is-still-a-presentation
+  (testing "the presentation part, not the slide count, decides the kind"
+    (let [out (img/read-office (img/pptx {:width 12192000
+                                          :height 6858000
+                                          :properties {:title "Empty deck"}
+                                          :slides []}))]
+      (is (= "presentation" (:kind out)))
+      (is (= [] (:slides out)))
+      (is (= "Empty deck" (get-in out [:properties :title]))))))
 (deftest any-document-reads-as-markdown
   (testing "a Word document keeps its heading, prose and table"
     (let [data (img/docx {:properties {:title "Memo"}

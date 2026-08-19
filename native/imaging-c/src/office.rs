@@ -238,7 +238,13 @@ fn kind_of(data: &[u8]) -> Kind {
         .collect();
     if names.iter().any(|n| n == "word/document.xml") {
         Kind::Word
-    } else if names.iter().any(|n| n.starts_with("ppt/slides/slide")) {
+    } else if names
+        .iter()
+        .any(|n| n == "ppt/presentation.xml" || n.starts_with("ppt/slides/slide"))
+    {
+        // A deck is identified by its presentation part, NOT by its slides: a
+        // freshly created presentation legally has none, and reading it as a
+        // workbook only produced calamine's "Cannot detect file format".
         Kind::Slides
     } else {
         Kind::Sheet
