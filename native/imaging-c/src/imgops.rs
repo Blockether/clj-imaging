@@ -96,6 +96,9 @@ fn reader(data: &[u8]) -> R<image::ImageReader<Cursor<&[u8]>>> {
 }
 
 pub fn decode(data: &[u8]) -> R<Image> {
+    if is_heif(data) {
+        return decode_heif(data);
+    }
     let img = reader(data)?
         .decode()
         .map_err(|e| format!("decode failed: {e}"))?;
@@ -110,6 +113,9 @@ pub fn decode(data: &[u8]) -> R<Image> {
 /// a decoded handle can no longer tell you: `decode` normalises everything to
 /// RGBA8.
 pub fn probe(data: &[u8]) -> R<serde_json::Value> {
+    if is_heif(data) {
+        return probe_heif(data);
+    }
     let reader = reader(data)?;
     let format = reader
         .format()
@@ -129,6 +135,77 @@ pub fn probe(data: &[u8]) -> R<serde_json::Value> {
         "bytes": data.len(),
         "is_animated": is_animated,
         "frames": frames,
+    });
+    merge_color(&mut v, color);
+    Ok(v)
+}
+
+// ---------------------------------------------------------------------------
+// HEIC / HEIF
+// ---------------------------------------------------------------------------
+
+/// `ftyp` brands of a HEVC-coded HEIF file: the still and sequence brands
+/// (`heic` `heix` `heim` `heis` / `hevc` `hevx`) and the generic MIAF ones
+/// (`mif1` `msf1`) that many encoders put first.
+const HEIF_BRANDS: [&[u8; 4]; 8] = [
+    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1",
+];
+
+/// True when `data` is a HEIF container. `image` has no HEIF decoder, so these
+/// bytes go to `heic-rs` instead. AVIF uses the same container and often the
+/// same `mif1` brand; its own major brand keeps it out, and `heic-rs` names the
+/// codec when an AV1 item still gets through.
+pub fn is_heif(data: &[u8]) -> bool {
+    if data.len() < 16 || &data[4..8] != b"ftyp" {
+        return false;
+    }
+    let major = &data[8..12];
+    if major == b"avif" || major == b"avis" {
+        return false;
+    }
+    let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let (compatible, _) = data[16..size.clamp(16, data.len())].as_chunks::<4>();
+    std::iter::once(major)
+        .chain(compatible.iter().map(|b| &b[..]))
+        .any(|b| HEIF_BRANDS.iter().any(|h| &h[..] == b))
+}
+
+/// The primary image of a HEIF file, display-ready: grid tiles joined,
+/// `clap`/`irot`/`imir` applied and any alpha plane attached. The pixel cap is
+/// the same one `reader` gives the `image` crate.
+fn decode_heif(data: &[u8]) -> R<Image> {
+    let opts = heic_rs::DecodeOptions {
+        layout: heic_rs::PixelLayout::Rgba8,
+        max_pixels: Some(DECODE_MAX_ALLOC / 4),
+        ..Default::default()
+    };
+    let img = heic_rs::decode(data, &opts).map_err(|e| format!("decode failed: heic: {e}"))?;
+    Image::from_rgba(img.width, img.height, &img.data)
+}
+
+/// `probe` for HEIF, read from the boxes alone. The size is the DISPLAY size
+/// (after rotation), so it matches what `decode` returns. Only the primary
+/// image is decoded, so a sequence (`msf1`) reports one still frame.
+fn probe_heif(data: &[u8]) -> R<serde_json::Value> {
+    let info = heic_rs::probe(data).map_err(|e| format!("probe failed: heic: {e}"))?;
+    let is_gray = info.chroma == heic_rs::ChromaFormat::Monochrome;
+    let color = match (is_gray, info.has_alpha, info.bit_depth > 8) {
+        (true, false, false) => ColorType::L8,
+        (true, true, false) => ColorType::La8,
+        (true, false, true) => ColorType::L16,
+        (true, true, true) => ColorType::La16,
+        (false, false, false) => ColorType::Rgb8,
+        (false, true, false) => ColorType::Rgba8,
+        (false, false, true) => ColorType::Rgb16,
+        (false, true, true) => ColorType::Rgba16,
+    };
+    let mut v = serde_json::json!({
+        "format": "heic",
+        "width": info.width,
+        "height": info.height,
+        "bytes": data.len(),
+        "is_animated": false,
+        "frames": 1,
     });
     merge_color(&mut v, color);
     Ok(v)
@@ -656,4 +733,64 @@ pub fn convert(data: &[u8], opts: &serde_json::Value) -> R<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1100x600 HEIC that macOS `sips` stored as a 3x2 grid of 512px tiles
+    /// with an alpha plane: the layout of an iPhone photo.
+    fn heic() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/fixtures/grid-alpha.heic"
+        ))
+        .expect("test fixture grid-alpha.heic")
+    }
+
+    /// An `ftyp` box with `major` first and `compatible` after it.
+    fn ftyp(major: &[u8; 4], compatible: &[&[u8; 4]]) -> Vec<u8> {
+        let size = 16 + 4 * compatible.len() as u32;
+        let mut v = size.to_be_bytes().to_vec();
+        v.extend_from_slice(b"ftyp");
+        v.extend_from_slice(major);
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        compatible.iter().for_each(|b| v.extend_from_slice(&b[..]));
+        v
+    }
+
+    #[test]
+    fn heif_brands_are_recognised_and_avif_is_not() {
+        assert!(is_heif(&heic()));
+        assert!(is_heif(&ftyp(b"mif1", &[b"mif1", b"heic"])));
+        assert!(is_heif(&ftyp(b"msf1", &[b"msf1", b"hevc"])));
+        assert!(!is_heif(&ftyp(b"avif", &[b"mif1", b"miaf"])));
+        assert!(!is_heif(&ftyp(b"isom", &[b"isom", b"avc1", b"mp41"])));
+        assert!(!is_heif(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn heic_probes_and_decodes_through_the_shared_entry_points() {
+        let data = heic();
+        let p = probe(&data).unwrap();
+        assert_eq!(p["format"], "heic");
+        assert_eq!(
+            (p["width"].as_u64(), p["height"].as_u64()),
+            (Some(1100), Some(600))
+        );
+        assert_eq!(p["has_alpha"], true);
+        let img = decode(&data).unwrap();
+        assert_eq!((img.width(), img.height()), (1100, 600));
+        let alpha = |x, y| img.buf.get_pixel(x, y).0[3] as i32;
+        assert!((alpha(50, 50) - 140).abs() <= 6);
+        assert!((alpha(150, 50) - 255).abs() <= 6);
+    }
+
+    #[test]
+    fn a_cut_heic_is_an_error_not_a_panic() {
+        let data = heic();
+        assert!(decode(&data[..600]).is_err());
+        assert!(probe(&data[..40]).is_err());
+    }
 }

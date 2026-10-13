@@ -349,9 +349,10 @@
           (fail! :probe)))))
 
 (defn decode
-  "Decode PNG/JPEG/WebP/GIF/BMP/TIFF/ICO/QOI/PNM/TGA/HDR/EXR bytes — or an
+  "Decode PNG/JPEG/WebP/GIF/BMP/TIFF/ICO/QOI/PNM/TGA/HDR/EXR/HEIC bytes — or an
    SVG/SVGZ document, sized the way a browser would (see `svg-canvas`) — into an
-   `Img` handle. Close it (`with-open`) when done."
+   `Img` handle. A HEIC comes back display-ready: grid tiles joined, rotation
+   and mirroring applied, alpha kept. Close it (`with-open`) when done."
   ^Img [data]
   (with-open [arena (Arena/ofConfined)]
     (let [^bytes b (->bytes data)]

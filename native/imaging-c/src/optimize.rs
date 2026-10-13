@@ -355,11 +355,14 @@ pub fn optimize(data: &[u8], o: &Value) -> R<Vec<u8>> {
             .and_then(|v| v.as_str())
             .unwrap_or_default(),
     );
-    let target = normalise(
-        &js(o, "format")
-            .map(str::to_string)
-            .unwrap_or(src_fmt.clone()),
-    );
+    // Nothing here encodes HEIC, so a HEIC source without a `format` becomes a
+    // JPEG: the format the same camera picture would otherwise have.
+    let src_default = if src_fmt == "heic" {
+        "jpeg".to_string()
+    } else {
+        src_fmt.clone()
+    };
+    let target = normalise(&js(o, "format").map(str::to_string).unwrap_or(src_default));
     let level = jf(o, "level").unwrap_or(3.0).clamp(0.0, 6.0) as u8;
     let strip = jb(o, "strip", true);
     let opts = png_options(level, strip);

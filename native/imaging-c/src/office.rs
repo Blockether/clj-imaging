@@ -158,6 +158,7 @@ pub fn image_info(data: &[u8]) -> R<(&'static str, &'static str, u32, u32)> {
         "bmp" => ("bmp", "image/bmp"),
         "tiff" => ("tiff", "image/tiff"),
         "webp" => ("png", "image/png"), // Office cannot embed WebP: re-encoded below
+        "heic" => ("png", "image/png"), // nor HEIC: re-encoded below
         other => return err(format!("unsupported image format for Office: {other}")),
     };
     Ok((ext, ct, w, h))
@@ -167,8 +168,9 @@ pub fn image_info(data: &[u8]) -> R<(&'static str, &'static str, u32, u32)> {
 /// PNG so callers can pass whatever `imaging` can decode.
 pub fn office_image(data: &[u8]) -> R<(Vec<u8>, &'static str, &'static str, u32, u32)> {
     let (ext, ct, w, h) = image_info(data)?;
-    if ct == "image/png" && crate::imgops::probe(data)?.get("format") == Some(&Value::from("webp"))
-    {
+    let probe = crate::imgops::probe(data)?;
+    let source = probe.get("format").and_then(Value::as_str).unwrap_or("");
+    if ct == "image/png" && source != "png" {
         let img = crate::imgops::decode(data)?;
         let png = crate::imgops::encode(&img, "png", 90)?;
         return Ok((png, ext, ct, w, h));

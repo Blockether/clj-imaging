@@ -681,6 +681,62 @@
       (is (= "jpeg" (:format (img/probe (img/optimize png {:format :jpeg :quality 75}))))))))
 
 ;; ---------------------------------------------------------------------------
+;; HEIC / HEIF
+;;
+;; `test/fixtures/grid-alpha.heic` is a 1100x600 picture that macOS `sips`
+;; stored the way an iPhone stores a photo: a 3x2 grid of 512px HEVC tiles,
+;; cropped to size, plus an alpha plane. The source had smooth RGB ramps and
+;; alpha 140 in every other 100px square, so a few pixels prove that the tiles,
+;; the crop and the alpha plane all landed in the right place.
+;; ---------------------------------------------------------------------------
+
+(defn- heic-bytes
+  ^bytes []
+  (with-open [in (io/input-stream (io/file "test/fixtures/grid-alpha.heic"))]
+    (.readAllBytes in)))
+
+(defn- unpack-rgba
+  "Unpack `0xRRGGBBAA` into `[r g b a]`."
+  [^long v]
+  (mapv #(bit-and (bit-shift-right v %) 0xff) [24 16 8 0]))
+
+(defn- near?
+  "Every channel within `tolerance` of the expected value: HEVC is lossy."
+  [tolerance want got]
+  (every? #(<= (Math/abs (long %)) tolerance) (map - want got)))
+
+(deftest heic-decodes-like-any-other-raster
+  (let [heic (heic-bytes)]
+    (testing "probe reads the boxes only: display size, source colour, one still"
+      (let [p (img/probe heic)]
+        (is (= "heic" (:format p)))
+        (is (= [1100 600] [(:width p) (:height p)]))
+        (is (= ["rgba8" 4 8 false true] (colour-of p)))
+        (is (= [false 1] [(:is-animated p) (:frames p)]))))
+    (testing "decode joins the grid tiles, crops them and keeps the alpha plane"
+      (with-open [im (img/decode heic)]
+        (is (= [1100 600] [(img/width im) (img/height im)]))
+        (doseq [[x y want] [[150 50 [26 250 50 255]]
+                            [50 50 [94 250 25 140]]
+                            [600 300 [104 220 225 255]]
+                            [520 530 [56 90 6 140]]
+                            [1050 550 [182 190 144 255]]]]
+          (is (near? 10 want (unpack-rgba (img/get-pixel im x y))) (str "pixel " x "," y)))))
+    (testing "convert turns a HEIC into a format every reader takes"
+      (let [p (img/probe (img/convert heic {:format :png :max-width 550}))]
+        (is (= ["png" 550 300] [(:format p) (:width p) (:height p)]))))
+    (testing "optimize without a :format writes JPEG, because nothing encodes HEIC"
+      (is (= "jpeg" (:format (img/probe (img/optimize heic {}))))))))
+
+(deftest heic-errors-are-the-decoders-own-words
+  (testing "a cut-off file fails cleanly instead of crashing the process"
+    (let [cut (java.util.Arrays/copyOf (heic-bytes) 600)]
+      (is (thrown? Exception (with-open [_ (img/decode cut)])))))
+  (testing "an AVIF header is not mistaken for HEIC"
+    (let [avif (byte-array (concat [0 0 0 24] (map int "ftypavif") [0 0 0 0] (map int "mif1miaf")))]
+      (is (thrown? Exception (img/probe avif))))))
+
+;; ---------------------------------------------------------------------------
 ;; Video (MP4 / H.264)
 ;;
 ;; `test/fixtures/bars.mp4` is a real H.264 clip: 64x48, 10 frames at 8 fps,

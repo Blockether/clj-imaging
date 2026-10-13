@@ -5,14 +5,15 @@ Images, SVG rasterization and plotting for Clojure — **without `java.desktop`*
 `com.blockether/imaging` is a thin Clojure FFM (Java 22+ `java.lang.foreign`) binding over a
 small Rust cdylib built on [`image`](https://crates.io/crates/image),
 [`resvg`/`usvg`](https://crates.io/crates/resvg), [`tiny-skia`](https://crates.io/crates/tiny-skia),
-[`re_mp4`](https://crates.io/crates/re_mp4), [`rust_h264`](https://crates.io/crates/rust_h264) and
-[`anydoc`](https://crates.io/crates/anydoc).
+[`re_mp4`](https://crates.io/crates/re_mp4), [`rust_h264`](https://crates.io/crates/rust_h264),
+[`heic-rs`](https://crates.io/crates/heic-rs) and [`anydoc`](https://crates.io/crates/anydoc).
 
 Why: AWT / Java2D / ImageIO drag the whole `java.desktop` module and its JNI surface into a
 GraalVM native image. This library replaces that with one self-contained native library, so
 decoding, drawing, text, SVG and charts all work in a native binary with nothing on `PATH`.
 
 * Pure-Rust codecs: PNG, JPEG, WebP (incl. **lossless** encode), GIF, BMP, TIFF, ICO, TGA, PNM, DDS, farbfeld, QOI
+* **HEIC/HEIF** decode (iPhone photos: grids, rotation, alpha) — read only; `convert` it to PNG, JPEG or WebP
 * SVG → raster via resvg, with the same font stack
 * Four Noto faces embedded (sans, sans-bold, sans-italic, mono) — no system fonts required
 * A declarative plotting DSL (lines, areas, steps, bars, hbars, stacked bars, scatter, histogram, pie, donut, heatmap)
