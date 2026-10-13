@@ -19,6 +19,12 @@ image = { version = "0.25", default-features = false, features = [
 # no `unsafe`, MIT OR Apache-2.0; grids, rotation, mirroring and alpha planes.
 # default-features off drops its `parallel` feature, so rayon stays out here too.
 heic-rs = { version = "0.1.4", default-features = false, features = ["std"] }
+# AV1 for AVIF. rav1d is the memory-safe Rust port of dav1d (BSD-2-Clause).
+# default-features off drops its `asm` features, so it builds no assembly and
+# needs no system library. Only the C-ABI `dav1d_*` functions are public.
+rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+# `EAGAIN`, the "send more data" answer of the dav1d API. Already in the tree.
+libc = "0.2"
 # resvg re-exports the EXACT tiny-skia + usvg it was built against; depend on
 # those re-exports (never a second copy) or the pixmap types stop matching.
 resvg = "0.47"
@@ -48,9 +54,10 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # That keeps the "links against nothing" property that lets this cdylib ship
 # inside a GraalVM native image.
 re_mp4 = "0.5"
-# `rust_h264` is vendored under ../vendor with one fix: 0.4.0 orders the P-slice
+# `rust_h264` is vendored under ../vendor with two fixes: 0.4.0 orders the P-slice
 # reference list by POC, which silently corrupts every stream that has more than
-# one reference frame and runs past the frame_num wrap. See ../vendor/PATCHES.md.
+# one reference frame and runs past the frame_num wrap, and it decodes 4:0:0
+# (monochrome) pictures, such as HEIF alpha items, as noise. See ../vendor/PATCHES.md.
 rust_h264 = { path = "../vendor/rust_h264", version = "0.4" }
 # Documents -> Markdown. `anydoc` is Firecrawl's pure-Rust document reader: it
 # parses doc/docx/odt/rtf/pdf/ppt/pptx/epub/xlsx/ods/odp/csv itself, with no

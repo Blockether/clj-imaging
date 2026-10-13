@@ -732,9 +732,46 @@
   (testing "a cut-off file fails cleanly instead of crashing the process"
     (let [cut (java.util.Arrays/copyOf (heic-bytes) 600)]
       (is (thrown? Exception (with-open [_ (img/decode cut)])))))
-  (testing "an AVIF header is not mistaken for HEIC"
+  (testing "a bare AVIF header without its item boxes fails cleanly"
     (let [avif (byte-array (concat [0 0 0 24] (map int "ftypavif") [0 0 0 0] (map int "mif1miaf")))]
       (is (thrown? Exception (img/probe avif))))))
+
+;; The other HEIF codecs. Each fixture is the same 64x48 picture: four flat
+;; quadrants (red, green, blue, light grey) and a transparent 16x12 corner at
+;; the bottom right. libheif 1.23 wrote them from one PNG source:
+;;
+;; * `lossy-alpha.avif`  AV1, 4:2:0, with an AV1 alpha plane
+;; * `lossless-rgb.avif` AV1, lossless 4:4:4, with alpha
+;; * `grid.avif`         AV1, 2x2 grid of 32x24 tiles, no alpha
+;; * `avc-alpha.heif`    H.264 (avc1) with an H.264 monochrome alpha plane
+;; * `jpeg-alpha.heif`   JPEG-coded item with an alpha plane
+
+(defn- fixture-bytes
+  ^bytes [name]
+  (with-open [in (io/input-stream (io/file "test/fixtures" name))]
+    (.readAllBytes in)))
+
+(deftest heif-decodes-every-common-codec
+  (doseq [[file fmt alpha?] [["lossy-alpha.avif" "avif" true]
+                             ["lossless-rgb.avif" "avif" true]
+                             ["grid.avif" "avif" false]
+                             ["avc-alpha.heif" "heif" true]
+                             ["jpeg-alpha.heif" "heif" true]]]
+    (testing file
+      (let [data (fixture-bytes file)
+            p    (img/probe data)]
+        (is (= [fmt 64 48 alpha?] [(:format p) (:width p) (:height p) (:has-alpha p)]))
+        (with-open [im (img/decode data)]
+          (is (= [64 48] [(img/width im) (img/height im)]))
+          (doseq [[x y want] [[10 10 [220 30 30 255]]
+                              [50 10 [30 160 40 255]]
+                              [10 40 [30 60 220 255]]
+                              [40 34 [240 240 240 255]]
+                              [60 44 [240 240 240 (if alpha? 0 255)]]]]
+            (is (near? 10 want (unpack-rgba (img/get-pixel im x y))) (str "pixel " x "," y))))
+        (testing "convert writes a PNG that keeps the size"
+          (let [png (img/probe (img/convert data {:format :png}))]
+            (is (= ["png" 64 48] [(:format png) (:width png) (:height png)]))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Video (MP4 / H.264)

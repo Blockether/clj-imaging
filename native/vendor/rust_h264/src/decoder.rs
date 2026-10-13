@@ -557,6 +557,19 @@ impl Decoder {
 
         let slice_qp = header.qp_y(pps);
 
+        if sps.chroma_format_idc > 1 {
+            return Err(DecodeError::from(
+                "4:2:2 and 4:4:4 chroma are not supported",
+            ));
+        }
+        // A monochrome picture keeps neutral chroma: with no chroma syntax,
+        // prediction from 128 stays 128.
+        let chroma_fill = if sps.chroma_format_idc == 0 {
+            128u8
+        } else {
+            0u8
+        };
+
         // Create or reuse PictureState for multi-slice support.
         // For continuation slices (first_mb > 0), reuse the pending state
         // so per-MB data from earlier slices is visible for MV prediction,
@@ -572,8 +585,8 @@ impl Decoder {
                     width,
                     height,
                     y: vec![0u8; (coded_width * coded_height) as usize],
-                    u: vec![0u8; (coded_width * coded_height / 4) as usize],
-                    v: vec![0u8; (coded_width * coded_height / 4) as usize],
+                    u: vec![chroma_fill; (coded_width * coded_height / 4) as usize],
+                    v: vec![chroma_fill; (coded_width * coded_height / 4) as usize],
                     pic_order_cnt: current_poc,
                 },
                 frame_num: header.frame_num,
@@ -767,6 +780,7 @@ impl Decoder {
             slice_qp,
             is_i_slice: header.slice_type == SliceType::I,
             cabac_init_idc: header.cabac_init_idc,
+            is_monochrome: sps.chroma_format_idc == 0,
         };
 
         // In MBAFF, first_mb_in_slice is a pair address

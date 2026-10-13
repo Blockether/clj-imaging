@@ -22,6 +22,7 @@ mod doc;
 mod doc_blocks;
 mod docx;
 mod filter;
+mod heif;
 mod imgops;
 mod office;
 mod optimize;

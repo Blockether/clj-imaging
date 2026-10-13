@@ -71,7 +71,33 @@ an adaptive-marking stream that wraps would fail to unmark a reference. Fixing
 it needs `MaxFrameNum` plumbed into `PictureState`, and no encoder we test emits
 those ops. Left alone deliberately.
 
+### Second patch: monochrome (4:0:0) pictures
+
+libheif stores the alpha plane of an H.264 HEIF image as a High-profile 4:0:0
+picture. Upstream reads `chroma_format_idc` from the SPS, but then reads chroma
+syntax in every macroblock anyway. The picture comes back as noise.
+
+For `chroma_format_idc == 0` (ChromaArrayType 0), the spec omits
+`intra_chroma_pred_mode`, the chroma bits of `coded_block_pattern` and the PCM
+chroma samples. CAVLC also maps `coded_block_pattern` through the 4:0:0 columns
+of Table 9-4.
+
+Changed files:
+
+- `src/slice_context.rs` — `SliceParams::is_monochrome`.
+- `src/decoder.rs` — sets `is_monochrome`, fills the chroma planes with 128,
+  and refuses 4:2:2 and 4:4:4 with an error instead of a wrong picture.
+- `src/residual.rs` — `CBP_INTRA_TABLE_GRAY`, `CBP_INTER_TABLE_GRAY` and
+  `cbp_from_code`.
+- `src/decode_cavlc.rs` and `src/decode_cabac.rs` — skip the chroma syntax and
+  the PCM chroma samples when `is_monochrome` is true.
+
+`heif::tests::h264_monochrome_matches_the_reference_decoder` (`imaging-c`)
+decodes two x264 4:0:0 stills (CABAC with 8x8 transforms, CAVLC with 4x4
+transforms). It compares them byte for byte with ffmpeg's decode in
+`test/fixtures/h264-gray-*.gray`.
+
 ### Upgrading
 
-If upstream releases a version with the ref-list fix, drop this directory and
+If upstream releases a version with both fixes, drop this directory and
 restore the plain `rust_h264 = "x.y"` dependency in `imaging-c/Cargo.toml`.

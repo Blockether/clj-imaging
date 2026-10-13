@@ -296,13 +296,21 @@ impl SliceContext<'_> {
                     } else {
                         0
                     };
-                    let intra_chroma_pred_mode = cr.decode_chroma_pred_mode(st, left_cm, top_cm);
+                    let intra_chroma_pred_mode = if sp.is_monochrome {
+                        0
+                    } else {
+                        cr.decode_chroma_pred_mode(st, left_cm, top_cm)
+                    };
                     self.mb_chroma_pred[mb_idx] = intra_chroma_pred_mode;
 
                     let (left_cbp, top_cbp, left_cbp_c, top_cbp_c) =
                         self.cabac_cbp_context(mb_idx, false);
                     let cbp_luma = cr.decode_cbp_luma(st, left_cbp, top_cbp);
-                    let cbp_chroma = cr.decode_cbp_chroma(st, left_cbp_c, top_cbp_c);
+                    let cbp_chroma = if sp.is_monochrome {
+                        0
+                    } else {
+                        cr.decode_cbp_chroma(st, left_cbp_c, top_cbp_c)
+                    };
                     self.mb_cbp[mb_idx] = (cbp_luma as u16) | ((cbp_chroma as u16) << 4);
 
                     let qp_y = if cbp_luma != 0 || cbp_chroma != 0 {
@@ -620,7 +628,11 @@ impl SliceContext<'_> {
                     } else {
                         0
                     };
-                    let intra_chroma_pred_mode = cr.decode_chroma_pred_mode(st, left_cm, top_cm);
+                    let intra_chroma_pred_mode = if sp.is_monochrome {
+                        0
+                    } else {
+                        cr.decode_chroma_pred_mode(st, left_cm, top_cm)
+                    };
                     self.mb_chroma_pred[mb_idx] = intra_chroma_pred_mode;
 
                     let delta = cr.decode_mb_qp_delta(st, self.last_qp_delta_nonzero);
@@ -915,7 +927,8 @@ impl SliceContext<'_> {
                 } else {
                     // I_PCM in P/B via CABAC
                     let pcm_pos = cr.pcm_byte_position();
-                    if pcm_pos + 384 > rbsp.len() {
+                    let chroma_rows = if sp.is_monochrome { 0 } else { 8 };
+                    if pcm_pos + 256 + 16 * chroma_rows > rbsp.len() {
                         return Err(DecodeError::UnexpectedEof);
                     }
                     let pcm_data = &rbsp[pcm_pos..];
@@ -930,7 +943,7 @@ impl SliceContext<'_> {
                         }
                     }
                     let cx = mb_x / 2;
-                    for r in 0..8 {
+                    for r in 0..chroma_rows {
                         for c in 0..8 {
                             let idx = self.lc_offset + r * self.lc_stride + cx + c;
                             if idx < self.frame.u.len() {
@@ -939,7 +952,7 @@ impl SliceContext<'_> {
                             off += 1;
                         }
                     }
-                    for r in 0..8 {
+                    for r in 0..chroma_rows {
                         for c in 0..8 {
                             let idx = self.lc_offset + r * self.lc_stride + cx + c;
                             if idx < self.frame.v.len() {
@@ -1413,7 +1426,11 @@ impl SliceContext<'_> {
                 let (left_cbp, top_cbp, left_cbp_c, top_cbp_c) =
                     self.cabac_cbp_context(mb_idx, false);
                 let cbp_luma = cr.decode_cbp_luma(st, left_cbp, top_cbp);
-                let cbp_chroma = cr.decode_cbp_chroma(st, left_cbp_c, top_cbp_c);
+                let cbp_chroma = if sp.is_monochrome {
+                    0
+                } else {
+                    cr.decode_cbp_chroma(st, left_cbp_c, top_cbp_c)
+                };
                 self.mb_cbp[mb_idx] = (cbp_luma as u16) | ((cbp_chroma as u16) << 4);
                 // 8x8 transform flag for inter MBs (spec 7.3.5).
                 // Only present when noSubMbPartSizeLessThan8x8Flag is true.
@@ -3001,7 +3018,11 @@ impl SliceContext<'_> {
                 let (left_cbp, top_cbp, left_cbp_c, top_cbp_c) =
                     self.cabac_cbp_context(mb_idx, false);
                 let cbp_luma = cr.decode_cbp_luma(st, left_cbp, top_cbp);
-                let cbp_chroma = cr.decode_cbp_chroma(st, left_cbp_c, top_cbp_c);
+                let cbp_chroma = if sp.is_monochrome {
+                    0
+                } else {
+                    cr.decode_cbp_chroma(st, left_cbp_c, top_cbp_c)
+                };
                 self.mb_cbp[mb_idx] = (cbp_luma as u16) | ((cbp_chroma as u16) << 4);
 
                 // 8x8 transform flag for B inter MBs (spec 7.3.5).
@@ -3298,7 +3319,8 @@ impl SliceContext<'_> {
         // I_PCM via CABAC
         if mb_type == 25 {
             let pcm_pos = cr.pcm_byte_position();
-            if pcm_pos + 384 > rbsp.len() {
+            let chroma_rows = if sp.is_monochrome { 0 } else { 8 };
+            if pcm_pos + 256 + 16 * chroma_rows > rbsp.len() {
                 return Err(DecodeError::UnexpectedEof);
             }
             let pcm_data = &rbsp[pcm_pos..];
@@ -3313,7 +3335,7 @@ impl SliceContext<'_> {
                 }
             }
             let cx = mb_x / 2;
-            for r in 0..8 {
+            for r in 0..chroma_rows {
                 for c in 0..8 {
                     let idx = self.lc_offset + r * self.lc_stride + cx + c;
                     if idx < self.frame.u.len() {
@@ -3322,7 +3344,7 @@ impl SliceContext<'_> {
                     off += 1;
                 }
             }
-            for r in 0..8 {
+            for r in 0..chroma_rows {
                 for c in 0..8 {
                     let idx = self.lc_offset + r * self.lc_stride + cx + c;
                     if idx < self.frame.v.len() {
@@ -3409,13 +3431,21 @@ impl SliceContext<'_> {
             } else {
                 0
             };
-            let intra_chroma_pred_mode = cr.decode_chroma_pred_mode(st, left_cm, top_cm);
+            let intra_chroma_pred_mode = if sp.is_monochrome {
+                0
+            } else {
+                cr.decode_chroma_pred_mode(st, left_cm, top_cm)
+            };
             self.mb_chroma_pred[mb_idx] = intra_chroma_pred_mode;
 
             // CBP with proper neighbor context
             let (left_cbp, top_cbp, left_cbp_c, top_cbp_c) = self.cabac_cbp_context(mb_idx, true);
             let cbp_luma = cr.decode_cbp_luma(st, left_cbp, top_cbp);
-            let cbp_chroma = cr.decode_cbp_chroma(st, left_cbp_c, top_cbp_c);
+            let cbp_chroma = if sp.is_monochrome {
+                0
+            } else {
+                cr.decode_cbp_chroma(st, left_cbp_c, top_cbp_c)
+            };
             self.mb_cbp[mb_idx] = (cbp_luma as u16) | ((cbp_chroma as u16) << 4);
             let qp_y = if cbp_luma != 0 || cbp_chroma != 0 {
                 let delta = cr.decode_mb_qp_delta(st, self.last_qp_delta_nonzero);
@@ -3749,7 +3779,11 @@ impl SliceContext<'_> {
             } else {
                 0
             };
-            let intra_chroma_pred_mode = cr.decode_chroma_pred_mode(st, left_cm, top_cm);
+            let intra_chroma_pred_mode = if sp.is_monochrome {
+                0
+            } else {
+                cr.decode_chroma_pred_mode(st, left_cm, top_cm)
+            };
             self.mb_chroma_pred[mb_idx] = intra_chroma_pred_mode;
             let delta = cr.decode_mb_qp_delta(st, self.last_qp_delta_nonzero);
             self.last_qp_delta_nonzero = delta != 0;

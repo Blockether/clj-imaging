@@ -35,6 +35,8 @@ pub(crate) struct SliceParams<'a> {
     pub slice_qp: i32,
     pub is_i_slice: bool,
     pub cabac_init_idc: u32,
+    /// `chroma_format_idc == 0`: no chroma syntax in any macroblock.
+    pub is_monochrome: bool,
 }
 use crate::dpb::DecodedPicture;
 use crate::inter_pred;

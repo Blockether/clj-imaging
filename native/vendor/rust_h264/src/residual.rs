@@ -395,6 +395,24 @@ pub const CBP_INTER_TABLE: [u8; 48] = [
     17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
 ];
 
+/// coded_block_pattern mapping when ChromaArrayType is 0 (monochrome):
+/// Table 9-4, columns for ChromaArrayType 0 or 3. Intra_4x4 / Intra_8x8.
+pub const CBP_INTRA_TABLE_GRAY: [u8; 16] = [15, 0, 7, 11, 13, 14, 3, 5, 10, 12, 1, 2, 4, 8, 6, 9];
+
+/// The same mapping for Inter macroblocks.
+pub const CBP_INTER_TABLE_GRAY: [u8; 16] = [0, 1, 2, 4, 8, 3, 5, 10, 12, 15, 7, 11, 13, 14, 6, 9];
+
+/// Map a CAVLC coded_block_pattern code number to the CBP, or `None` when the
+/// code is out of range for the chroma format.
+pub fn cbp_from_code(code: usize, intra: bool, monochrome: bool) -> Option<u8> {
+    match (monochrome, intra) {
+        (true, true) => CBP_INTRA_TABLE_GRAY.get(code).copied(),
+        (true, false) => CBP_INTER_TABLE_GRAY.get(code).copied(),
+        (false, true) => CBP_INTRA_TABLE.get(code).copied(),
+        (false, false) => CBP_INTER_TABLE.get(code).copied(),
+    }
+}
+
 /// Dequantize a full 4x4 block (including DC at position [0][0]) in raster order.
 /// `scale` is the scaling matrix in scan order; mapped to raster via ZIGZAG_4X4.
 pub fn dequant_4x4_full(block: &mut [i32; 16], qp: i32, scale: &[u8; 16]) {

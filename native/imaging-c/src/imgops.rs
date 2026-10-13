@@ -144,25 +144,22 @@ pub fn probe(data: &[u8]) -> R<serde_json::Value> {
 // HEIC / HEIF
 // ---------------------------------------------------------------------------
 
-/// `ftyp` brands of a HEVC-coded HEIF file: the still and sequence brands
-/// (`heic` `heix` `heim` `heis` / `hevc` `hevx`) and the generic MIAF ones
-/// (`mif1` `msf1`) that many encoders put first.
-const HEIF_BRANDS: [&[u8; 4]; 8] = [
-    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1",
+/// `ftyp` brands of a HEIF file: the HEVC still and sequence brands (`heic`
+/// `heix` `heim` `heis` / `hevc` `hevx`), the AV1 ones (`avif` `avis`), the
+/// H.264 ones (`avci` `avcs`), JPEG (`jpeg`), uncompressed (`unif`) and the
+/// generic MIAF ones (`mif1` `msf1`) that many encoders put first.
+const HEIF_BRANDS: [&[u8; 4]; 14] = [
+    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"avif", b"avis", b"avci", b"avcs",
+    b"jpeg", b"unif", b"mif1", b"msf1",
 ];
 
 /// True when `data` is a HEIF container. `image` has no HEIF decoder, so these
-/// bytes go to `heic-rs` instead. AVIF uses the same container and often the
-/// same `mif1` brand; its own major brand keeps it out, and `heic-rs` names the
-/// codec when an AV1 item still gets through.
+/// bytes go to `heif::decode`, which picks the codec of the primary item.
 pub fn is_heif(data: &[u8]) -> bool {
     if data.len() < 16 || &data[4..8] != b"ftyp" {
         return false;
     }
     let major = &data[8..12];
-    if major == b"avif" || major == b"avis" {
-        return false;
-    }
     let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let (compatible, _) = data[16..size.clamp(16, data.len())].as_chunks::<4>();
     std::iter::once(major)
@@ -174,12 +171,8 @@ pub fn is_heif(data: &[u8]) -> bool {
 /// `clap`/`irot`/`imir` applied and any alpha plane attached. The pixel cap is
 /// the same one `reader` gives the `image` crate.
 fn decode_heif(data: &[u8]) -> R<Image> {
-    let opts = heic_rs::DecodeOptions {
-        layout: heic_rs::PixelLayout::Rgba8,
-        max_pixels: Some(DECODE_MAX_ALLOC / 4),
-        ..Default::default()
-    };
-    let img = heic_rs::decode(data, &opts).map_err(|e| format!("decode failed: heic: {e}"))?;
+    let img = crate::heif::decode(data, DECODE_MAX_ALLOC / 4)
+        .map_err(|e| format!("decode failed: {e}"))?;
     Image::from_rgba(img.width, img.height, &img.data)
 }
 
@@ -187,9 +180,8 @@ fn decode_heif(data: &[u8]) -> R<Image> {
 /// (after rotation), so it matches what `decode` returns. Only the primary
 /// image is decoded, so a sequence (`msf1`) reports one still frame.
 fn probe_heif(data: &[u8]) -> R<serde_json::Value> {
-    let info = heic_rs::probe(data).map_err(|e| format!("probe failed: heic: {e}"))?;
-    let is_gray = info.chroma == heic_rs::ChromaFormat::Monochrome;
-    let color = match (is_gray, info.has_alpha, info.bit_depth > 8) {
+    let info = crate::heif::probe(data).map_err(|e| format!("probe failed: {e}"))?;
+    let color = match (info.is_gray, info.has_alpha, info.bit_depth > 8) {
         (true, false, false) => ColorType::L8,
         (true, true, false) => ColorType::La8,
         (true, false, true) => ColorType::L16,
@@ -200,7 +192,7 @@ fn probe_heif(data: &[u8]) -> R<serde_json::Value> {
         (false, true, true) => ColorType::Rgba16,
     };
     let mut v = serde_json::json!({
-        "format": "heic",
+        "format": info.format,
         "width": info.width,
         "height": info.height,
         "bytes": data.len(),
@@ -761,11 +753,13 @@ mod tests {
     }
 
     #[test]
-    fn heif_brands_are_recognised_and_avif_is_not() {
+    fn heif_brands_are_recognised() {
         assert!(is_heif(&heic()));
         assert!(is_heif(&ftyp(b"mif1", &[b"mif1", b"heic"])));
         assert!(is_heif(&ftyp(b"msf1", &[b"msf1", b"hevc"])));
-        assert!(!is_heif(&ftyp(b"avif", &[b"mif1", b"miaf"])));
+        assert!(is_heif(&ftyp(b"avif", &[b"mif1", b"miaf"])));
+        assert!(is_heif(&ftyp(b"avci", &[b"mif1", b"miaf"])));
+        assert!(is_heif(&ftyp(b"jpeg", &[b"mif1", b"jpeg"])));
         assert!(!is_heif(&ftyp(b"isom", &[b"isom", b"avc1", b"mp41"])));
         assert!(!is_heif(b"\x89PNG\r\n\x1a\n"));
     }
