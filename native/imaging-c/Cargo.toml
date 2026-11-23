@@ -75,6 +75,9 @@ anydoc = "0.1.3"
 # and same version anydoc already resolves, so this costs no extra build.
 pdf-inspector = "0.1.7"
 
+[patch.crates-io]
+tzim = { path = "../vendor/tzim" }
+
 [profile.release]
 lto = true
 codegen-units = 1

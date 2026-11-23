@@ -1,0 +1,9 @@
+/target
+/fuzz/target
+Cargo.lock.orig
+*.log
+.DS_Store
+
+# Python bytecode from the CI scripts (#54)
+__pycache__/
+*.pyc

@@ -3,7 +3,7 @@
 use std::io::Cursor;
 
 use png::{BitDepth, ColorType, Reader};
-use tzim::formats::{Allow, Cand, Options, jpeg};
+use tzim::formats::{Allow, Options, jpeg};
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 // Bound work and allocations before starting either background optimizer.
@@ -112,10 +112,13 @@ fn same_png_samples(before: &[u8], after: &[u8]) -> Option<bool> {
         }
     };
 
-    // Adam7 scanlines are in pass order, not image order. Deinterlace first
-    // if either image uses Adam7; otherwise retain just a row per image.
-    if before.info().interlaced || after.info().interlaced {
-        return Some(same(&png_samples(before)?, &png_samples(after)?));
+    // Adam7 scanlines are in pass order, not image order. Only the Adam7
+    // side needs a full buffer when the other side is already in image order.
+    match (before.info().interlaced, after.info().interlaced) {
+        (true, true) => return Some(same(&png_samples(before)?, &png_samples(after)?)),
+        (true, false) => return compare_png_rows(before, after, width, same),
+        (false, true) => return compare_png_rows(after, before, width, |b, a| same(a, b)),
+        (false, false) => (),
     }
     let mut a = vec![0; before.output_line_size(width)?];
     let mut b = vec![0; after.output_line_size(width)?];
@@ -133,6 +136,28 @@ fn same_png_samples(before: &[u8], after: &[u8]) -> Option<bool> {
     }
     before.finish().ok()?;
     after.finish().ok()?;
+    Some(true)
+}
+
+fn compare_png_rows(
+    interlaced: Reader<Cursor<&[u8]>>,
+    mut plain: Reader<Cursor<&[u8]>>,
+    width: u32,
+    same: impl Fn(&[u8], &[u8]) -> bool,
+) -> Option<bool> {
+    let row_len = interlaced.output_line_size(width)?;
+    let samples = png_samples(interlaced)?;
+    let mut row = vec![0; plain.output_line_size(width)?];
+    for expected in samples.chunks_exact(row_len) {
+        plain.read_row(&mut row).ok()??;
+        if !same(expected, &row) {
+            return Some(false);
+        }
+    }
+    if plain.read_row(&mut row).ok()?.is_some() {
+        return None;
+    }
+    plain.finish().ok()?;
     Some(true)
 }
 
@@ -222,15 +247,7 @@ fn jpeg(data: &[u8]) -> Option<Vec<u8>> {
         allow: Allow::default(),
         fits_tile: false,
     };
-    let mut out = Vec::new();
-    match jpeg::optimize(data, &mut out, &opts).ok()? {
-        Cand::Written(_) if out.len() < data.len() => {
-            // Verify markers, coefficients and decoded pixels independently.
-            jpeg::verify(data, &out, &opts).ok()?;
-            Some(out)
-        }
-        _ => None,
-    }
+    jpeg::optimize_verified(data, &opts).ok()?
 }
 
 /// Return a smaller image, or `None` to keep the input (also on error or panic).
@@ -346,5 +363,14 @@ mod tests {
         assert_eq!(same_png_samples(&original, &interlaced), Some(true));
         assert_eq!(same_png_samples(&interlaced, &original), Some(true));
         assert_eq!(same_png_samples(&interlaced, &changed), Some(false));
+        assert_eq!(same_png_samples(&changed, &original), Some(false));
+        let bad_adler = png_image(
+            ColorType::Grayscale,
+            BitDepth::Eight,
+            false,
+            &[0, 10, 20, 0, 30, 40],
+            true,
+        );
+        assert_eq!(same_png_samples(&interlaced, &bad_adler), None);
     }
 }
