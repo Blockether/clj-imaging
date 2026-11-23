@@ -33,7 +33,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.23"
 oxipng = { version = "10.1.1", default-features = false, features = ["zopfli"] }
+png = "0.18"
 jpeg-encoder = "0.7.1"
+# Its library API is not stable across versions. Keep the independent verifier.
+tzim = { version = "=0.16.3", default-features = false, features = ["jpeg-v1"] }
 gif = "0.14.2"
 # Office (OOXML). Pure Rust, no system libraries and no Java: rust_xlsxwriter
 # writes .xlsx, `zip` + hand-written WordprocessingML/PresentationML write .docx

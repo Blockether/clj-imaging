@@ -961,6 +961,7 @@ dependencies = [
  "libc",
  "oxipng",
  "pdf-inspector",
+ "png",
  "quick-xml",
  "rav1d",
  "re_mp4",
@@ -969,6 +970,7 @@ dependencies = [
  "rust_xlsxwriter",
  "serde",
  "serde_json",
+ "tzim",
  "usvg",
  "zip",
 ]
@@ -1095,6 +1097,12 @@ dependencies = [
  "getrandom",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "jpeg-encoder"
@@ -2151,6 +2159,16 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "tzim"
+version = "0.16.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4e61c1db259c8390d2a616bb6fa8141c868234a5c19025fcffe8a50a3c3b2dc"
+dependencies = [
+ "crc32fast",
+ "jpeg-decoder",
+]
 
 [[package]]
 name = "unicode-bidi"

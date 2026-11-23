@@ -156,6 +156,24 @@ H.264 Baseline/Main/High decode; HEVC, AV1 and VP9 are demuxed but report
 Every series takes `:name`, `:color` and either `:y` (implicit x) or `:x`/`:y` pairs;
 `histogram` takes `:values` + `:bins`, `heatmap` takes a row-major `:z` matrix.
 
+## Shrink an image without changing its contents
+
+```clojure
+(img/optimize bytes {:strict true})
+```
+
+Strict mode uses oxipng for still PNG and optimizes Huffman tables for
+supported baseline JPEG. It checks that the result keeps the samples and
+metadata. The default PNG effort is `:level 2`.
+
+Strict mode returns the input if it cannot make a smaller file that passes
+these checks. It also returns invalid input, APNG, GIF, and WebP unchanged.
+Do not combine `:strict true` with `:lossy`, `:strip true`, `:quality`,
+`:format`, or `:max-*` options.
+
+Without strict mode, `optimize` can remove metadata that affects display.
+It can also change colors, frames, and delays when it re-encodes a GIF.
+
 ## Memory model
 
 `Img` handles are `AutoCloseable` and also registered with a `Cleaner`, guarded by one

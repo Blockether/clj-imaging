@@ -9,16 +9,17 @@
 //!   mode the image is first palette-reduced by [`crate::quant`] (median cut +
 //!   Floyd–Steinberg) and handed to oxipng as an indexed `RawImage`, which is
 //!   how pngquant-class savings are reached without leaving Rust.
-//! * **JPEG** is optimised LOSSLESSLY by default — the metadata segments go
-//!   (jpegtran's `-copy none`) and every DCT coefficient is copied byte for
-//!   byte. A caller who asks for `lossy`, a `quality` or a `max_bytes` it
-//!   cannot otherwise meet gets a re-encode through [`jpeg_encoder`] with
-//!   optimised Huffman tables and progressive scans — the mozjpeg tricks that
-//!   are pure Rust.
+//! * **JPEG** keeps the original scan by default. Removing metadata can
+//!   change the display orientation. A caller can request a re-encode with
+//!   new Huffman tables and progressive scans through [`jpeg_encoder`].
 //! * **GIF** is rebuilt with the [`gif`] crate the way gifsicle does it:
 //!   per-frame median-cut palettes, inter-frame differencing (unchanged pixels
 //!   become the transparent index) and cropping to the changed bounding box.
+//!   This can change colors, delays, and frame disposal.
 //! * Everything else round-trips through [`crate::imgops`].
+//!
+//! Use strict mode to verify a smaller PNG or JPEG without changes to
+//! decoded samples or metadata.
 //!
 //! Optimising never makes a file bigger: when the output format matches the
 //! input and the result is not smaller, the original bytes are returned
@@ -164,8 +165,7 @@ fn jpeg_strip(data: &[u8], strip: bool) -> R<Vec<u8>> {
             return Ok(data.to_vec());
         }
         let end = i + 2 + len;
-        // COM, EXIF/XMP (APP1), Photoshop/IPTC (APP3-APP13) and APP15 are
-        // pure metadata.
+        // Drop application metadata, including EXIF orientation, when asked.
         let drop = matches!(marker, 0xFE | 0xE1 | 0xE3..=0xED | 0xEF);
         if !drop {
             out.extend_from_slice(&data[i..end]);
@@ -332,11 +332,8 @@ fn optimize_gif(data: &[u8], colors: usize, dither: bool) -> R<Vec<u8>> {
 
 /// Optimise `data` in place of re-encoding it blindly.
 ///
-/// LOSSLESS unless asked otherwise: PNG goes through oxipng, and a JPEG nobody
-/// asked to re-encode only loses its metadata segments ([`jpeg_strip`]) — not
-/// one DCT coefficient moves. Passing `lossy`, a `quality`, a smaller
-/// `format`, a `max_width`/`max_height` or a `max_bytes` it cannot otherwise
-/// meet is what licenses a re-encode.
+/// Use `strict` to keep all metadata and samples. Without it, PNG and JPEG
+/// can lose metadata that affects display. GIF can change colors and frames.
 ///
 /// Options: `format` (default: the input's), `level` 0-6 (oxipng preset, 6 =
 /// Zopfli), `lossy` (palette-reduce PNG, re-encode JPEG), `colors` (2-256),
@@ -345,6 +342,22 @@ fn optimize_gif(data: &[u8], colors: usize, dither: bool) -> R<Vec<u8>> {
 /// (downscale to fit, never enlarge), `max_bytes` (walk quality/colours/scale
 /// down until it fits) and `force` (accept a bigger result).
 pub fn optimize(data: &[u8], o: &Value) -> R<Vec<u8>> {
+    if jb(o, "strict", false) {
+        if o.as_object().is_some_and(|opts| {
+            opts.keys().any(|k| {
+                k.starts_with("max_")
+                    || k.starts_with("max-")
+                    || matches!(k.as_str(), "quality" | "format" | "lossy")
+            })
+        }) || jb(o, "strip", false)
+        {
+            return err("optimize: option conflicts with strict mode");
+        }
+        return Ok(crate::optimize_strict::optimize(data, || {
+            let level = jf(o, "level").unwrap_or(2.0).clamp(0.0, 6.0) as u8;
+            png_options(level, false)
+        }));
+    }
     if data.is_empty() {
         return err("optimize: empty input");
     }

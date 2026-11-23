@@ -26,6 +26,7 @@ mod heif;
 mod imgops;
 mod office;
 mod optimize;
+mod optimize_strict;
 mod plot;
 mod plot3d;
 mod pptx;

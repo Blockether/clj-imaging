@@ -640,6 +640,49 @@
         (is (not (java.util.Arrays/equals (rgba-of jpeg) (rgba-of o)))))
       (is (< (alength (img/optimize jpeg {:lossy true})) (alength jpeg))))))
 
+(defn- strict-fixture ^bytes [file]
+  (with-open [in (io/input-stream (io/resource (str "fixtures/" file)))]
+    (.readAllBytes in)))
+
+(defn- contains-bytes? [^bytes data ^bytes marker]
+  (not (neg? (.indexOf (String. data java.nio.charset.StandardCharsets/ISO_8859_1)
+                       (String. marker java.nio.charset.StandardCharsets/ISO_8859_1)))))
+
+(deftest optimize-strict-keeps-jpeg-orientation
+  (let [src (strict-fixture "strict-orientation.jpg")
+        out (img/optimize src {:strict true})
+        ;; The APP1 segment contains a big-endian TIFF Orientation of 6.
+        app1 (java.util.Arrays/copyOfRange src 20 56)]
+    (is (contains-bytes? out app1))
+    (is (< (alength out) (alength src)))
+    (is (java.util.Arrays/equals (rgba-of src) (rgba-of out)))))
+
+(deftest optimize-strict-keeps-png-metadata
+  (let [src (strict-fixture "strict-metadata.png")
+        out (img/optimize src {:strict true})]
+    (is (< (alength out) (alength src)))
+    ;; Compare the complete gAMA and eXIf chunks, including their CRCs.
+    (is (contains-bytes? out (java.util.Arrays/copyOfRange src 33 49)))
+    (is (contains-bytes? out (java.util.Arrays/copyOfRange src 49 87)))
+    (is (java.util.Arrays/equals (rgba-of src) (rgba-of out)))))
+
+(deftest optimize-strict-keeps-hidden-rgb
+  (let [src (strict-fixture "strict-hidden-rgb.png")
+        out (img/optimize src {:strict true})]
+    (is (< (alength out) (alength src)))
+    (is (java.util.Arrays/equals (rgba-of src) (rgba-of out)))))
+
+(deftest optimize-strict-rejects-conflicting-options
+  (doseq [opts [{:lossy true} {:lossy false} {:quality 75} {:format :jpeg} {:strip true}
+                {:max-width 16} {:max-height 12} {:max-bytes 1000}]]
+    (is (thrown? IllegalArgumentException (img/optimize (png-bytes) (assoc opts :strict true))))))
+
+(deftest optimize-strict-keeps-bad-input
+  (doseq [bad [(byte-array 0) (byte-array [1 2 3])
+               (java.util.Arrays/copyOf (png-bytes) 40)
+               (java.util.Arrays/copyOf (strict-fixture "strict-orientation.jpg") 40)]]
+    (is (java.util.Arrays/equals ^bytes bad (img/optimize bad {:strict true})))))
+
 (deftest optimize-gif-differences-frames-like-gifsicle
   (let [w 200 h 120
         frame (fn [i]
@@ -659,6 +702,7 @@
         back  (img/decode-gif out)]
     (is (< (alength out) (alength anim)) (str (alength anim) " -> " (alength out)))
     (is (= 6 (count (:frames back))) "an animation is never flattened to one frame")
+    (is (java.util.Arrays/equals anim (img/optimize anim {:strict true})))
     (is (every? #(= 80 (:delay-ms %)) (:frames back)) "and keeps its timing")))
 
 (deftest optimize-honours-max-bytes-and-max-dimensions

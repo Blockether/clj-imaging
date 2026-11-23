@@ -716,15 +716,17 @@
 ;; ---------------------------------------------------------------------------
 
 (defn optimize
-  "Shrink an ENCODED image with the real, format-specific optimisers — oxipng
-   (filter/heuristic search, colour-type and palette reduction, optional zopfli)
-   for PNG, jpegtran-style lossless metadata stripping for JPEG, and a
-   differencing re-encoder (gifsicle's algorithm) for GIF. Takes and returns
-   encoded bytes.
+  "Shrink an encoded image. Takes and returns encoded bytes.
 
-   LOSSLESS unless you ask otherwise: the pixels of a PNG or a JPEG come back
-   bit-identical unless `:lossy`, a `:quality`, a different `:format`, a
-   `:max-width`/`:max-height` or an unmeetable `:max-bytes` licenses a re-encode.
+   Set `:strict true` to keep metadata and decoded samples. This mode verifies
+   still PNG samples and baseline JPEG coefficients. It returns unsupported
+   or invalid input unchanged and never returns a larger file. The PNG effort
+   defaults to level 2. Do not use `:lossy`, `:strip true`, `:quality`,
+   `:format`, or `:max-*` options in strict mode.
+
+   Without strict mode, PNG can change RGB values under transparent pixels.
+   JPEG can lose EXIF orientation. GIF can change colors and animation.
+   Other formats can lose animation or change pixels when re-encoded.
 
    Options: `:format` (default: keep the input's) `:level` 0-6 effort
    `:lossy` (palette-quantise PNG / re-encode JPEG) `:colors` `:dither`
@@ -733,9 +735,18 @@
    `:max-bytes` (keep trying until it fits)
    `:force` (return the optimised bytes even when they are bigger).
 
-   Returns a byte[] — the smaller of optimised and original unless `:force`."
+   Returns a byte[]. In strict mode, `:force` has no effect."
   (^bytes [data] (optimize data nil))
   (^bytes [data opts]
+   (when (and (or (true? (:strict opts)) (true? (get opts "strict")))
+              (some (fn [[k v]]
+                      (let [k (wire-key k)]
+                        (or (#{"format" "quality" "lossy"} k)
+                            (and (= "strip" k) (true? v))
+                            (str/starts-with? k "max_")
+                            (str/starts-with? k "max-"))))
+                    opts))
+     (throw (IllegalArgumentException. "optimize: option conflicts with strict mode")))
    (with-open [arena (Arena/ofConfined)]
      (let [^bytes b (->bytes data)]
        (take-bytes! (invoke :optimize (alloc-bytes arena b) (long (alength b))
