@@ -144,13 +144,16 @@
 
 (defn- take-bytes!
   "Read an owned `Buf*` result into a byte[] and free it."
-  ^bytes [^MemorySegment p op]
-  (when (null? p) (fail! op))
-  (let [len  (long (invoke :buf-len p))
-        data ^MemorySegment (invoke :buf-ptr p)
-        out  (.toArray (.reinterpret ^MemorySegment data len) ValueLayout/JAVA_BYTE)]
-    (invoke :buf-free p)
-    out))
+  (^bytes [^MemorySegment p op] (take-bytes! p op nil))
+  (^bytes [^MemorySegment p op ^bytes empty-result]
+   (when (null? p) (fail! op))
+   (try
+     (let [len (long (invoke :buf-len p))]
+       (if (and (zero? len) empty-result)
+         empty-result
+         (let [^MemorySegment data (invoke :buf-ptr p)]
+           (.toArray (.reinterpret data len) ValueLayout/JAVA_BYTE))))
+     (finally (invoke :buf-free p)))))
 
 ;; ---------------------------------------------------------------------------
 ;; JSON + colours
@@ -720,8 +723,9 @@
 
    Set `:strict true` to keep metadata and decoded samples. This mode verifies
    still PNG samples and baseline JPEG coefficients. It returns unsupported
-   or invalid input unchanged and never returns a larger file. The PNG effort
-   defaults to level 2. Do not use `:lossy`, `:strip true`, `:quality`,
+   or invalid input unchanged and never returns a larger file. If it cannot
+   shrink a byte array, it returns the same array. The PNG effort defaults to
+   level 2. Do not use `:lossy`, `:strip true`, `:quality`,
    `:format`, or `:max-*` options in strict mode.
 
    Without strict mode, PNG can change RGB values under transparent pixels.
@@ -738,20 +742,23 @@
    Returns a byte[]. In strict mode, `:force` has no effect."
   (^bytes [data] (optimize data nil))
   (^bytes [data opts]
-   (when (and (or (true? (:strict opts)) (true? (get opts "strict")))
-              (some (fn [[k v]]
-                      (let [k (wire-key k)]
-                        (or (#{"format" "quality" "lossy"} k)
-                            (and (= "strip" k) (true? v))
-                            (str/starts-with? k "max_")
-                            (str/starts-with? k "max-"))))
-                    opts))
-     (throw (IllegalArgumentException. "optimize: option conflicts with strict mode")))
-   (with-open [arena (Arena/ofConfined)]
-     (let [^bytes b (->bytes data)]
-       (take-bytes! (invoke :optimize (alloc-bytes arena b) (long (alength b))
-                            (json-arg arena (color-opt opts [:background])))
-                    :optimize)))))
+   (let [strict? (or (true? (:strict opts)) (true? (get opts "strict")))]
+     (when (and strict?
+                (some (fn [[k v]]
+                        (let [k (wire-key k)]
+                          (or (#{"format" "quality" "lossy"} k)
+                              (and (= "strip" k) (true? v))
+                              (str/starts-with? k "max_")
+                              (str/starts-with? k "max-"))))
+                      opts))
+       (throw (IllegalArgumentException. "optimize: option conflicts with strict mode")))
+     (with-open [arena (Arena/ofConfined)]
+       (let [^bytes b (->bytes data)
+             opts (cond-> (color-opt opts [:background])
+                    strict? (assoc "empty_if_unchanged" true))]
+         (take-bytes! (invoke :optimize (alloc-bytes arena b) (long (alength b))
+                              (json-arg arena opts))
+                      :optimize (when strict? b)))))))
 
 (defn quantize
   "Median-cut colour quantisation with optional Floyd-Steinberg dithering — the

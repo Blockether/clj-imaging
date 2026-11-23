@@ -409,7 +409,9 @@ pub unsafe extern "C" fn imaging_video_to_gif(
 /// a differencing GIF re-encoder. Options JSON: `format` (default: keep the
 /// input's), `level` 0-6 effort, `lossy` (palette-quantise PNG, allow JPEG
 /// re-encode), `colors`, `dither`, `quality`, `progressive`, `strip`,
-/// `background`, `max_width`/`max_height`, `max_bytes`, `force`.
+/// `background`, `max_width`/`max_height`, `max_bytes`, `force`. With both
+/// `strict` and `empty_if_unchanged`, a non-null buffer of length zero means
+/// the caller must keep the input.
 ///
 /// # Safety
 /// `data`/`len` must be readable; `opts` a C string or NULL.

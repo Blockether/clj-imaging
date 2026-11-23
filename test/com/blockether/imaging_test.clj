@@ -681,7 +681,15 @@
   (doseq [bad [(byte-array 0) (byte-array [1 2 3])
                (java.util.Arrays/copyOf (png-bytes) 40)
                (java.util.Arrays/copyOf (strict-fixture "strict-orientation.jpg") 40)]]
-    (is (java.util.Arrays/equals ^bytes bad (img/optimize bad {:strict true})))))
+    (is (identical? bad (img/optimize bad {:strict true})))))
+
+(deftest optimize-strict-returns-the-input-when-already-small
+  (let [src (strict-fixture "strict-orientation.jpg")
+        out (img/optimize src {"strict" true})]
+    (is (< (alength out) (alength src)))
+    (is (identical? out (img/optimize out {"strict" true})))
+    (with-open [in (java.io.ByteArrayInputStream. out)]
+      (is (java.util.Arrays/equals out (img/optimize in {:strict true}))))))
 
 (deftest optimize-gif-differences-frames-like-gifsicle
   (let [w 200 h 120

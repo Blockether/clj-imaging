@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use png::{BitDepth, ColorType, OutputInfo};
+use png::{BitDepth, ColorType, Reader};
 use tzim::formats::{Allow, Cand, Options, jpeg};
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -52,7 +52,7 @@ fn png_metadata(data: &[u8]) -> Option<PngMetadata<'_>> {
     }
 }
 
-fn png_samples(data: &[u8]) -> Option<(OutputInfo, Vec<u8>)> {
+fn png_reader(data: &[u8]) -> Option<Reader<Cursor<&[u8]>>> {
     let mut checks = png::DecodeOptions::default();
     checks.set_ignore_adler32(false);
     checks.set_skip_ancillary_crc_failures(false);
@@ -61,18 +61,21 @@ fn png_samples(data: &[u8]) -> Option<(OutputInfo, Vec<u8>)> {
     // Ancillary bytes are checked separately. Do not inflate text or profiles.
     decoder.set_ignore_text_chunk(true);
     decoder.set_ignore_iccp_chunk(true);
-    let mut reader = decoder.read_info().ok()?;
+    decoder.read_info().ok()
+}
+
+fn png_samples(mut reader: Reader<Cursor<&[u8]>>) -> Option<Vec<u8>> {
     let mut samples = vec![0; reader.output_buffer_size()?];
-    let info = reader.next_frame(&mut samples).ok()?;
+    reader.next_frame(&mut samples).ok()?;
     reader.finish().ok()?;
-    Some((info, samples))
+    Some(samples)
 }
 
 /// Compare color-type reductions and bit-depth reductions after exact widening.
 /// The caller uses byte equality for the common case with the same layout.
-fn rgba16(data: &[u8], info: &OutputInfo) -> impl Iterator<Item = [u16; 4]> {
-    let wide = info.bit_depth == BitDepth::Sixteen;
-    let stride = info.color_type.samples() * if wide { 2 } else { 1 };
+fn rgba16(data: &[u8], (kind, depth): (ColorType, BitDepth)) -> impl Iterator<Item = [u16; 4]> {
+    let wide = depth == BitDepth::Sixteen;
+    let stride = kind.samples() * if wide { 2 } else { 1 };
     let sample = move |p: &[u8], i: usize| {
         if wide {
             u16::from_be_bytes([p[2 * i], p[2 * i + 1]])
@@ -80,7 +83,6 @@ fn rgba16(data: &[u8], info: &OutputInfo) -> impl Iterator<Item = [u16; 4]> {
             u16::from(p[i]) * 257
         }
     };
-    let kind = info.color_type;
     data.chunks_exact(stride).map(move |p| {
         let first = sample(p, 0);
         match kind {
@@ -91,6 +93,47 @@ fn rgba16(data: &[u8], info: &OutputInfo) -> impl Iterator<Item = [u16; 4]> {
             ColorType::Indexed => unreachable!("ALPHA expands the palette"),
         }
     })
+}
+
+fn same_png_samples(before: &[u8], after: &[u8]) -> Option<bool> {
+    let mut before = png_reader(before)?;
+    let mut after = png_reader(after)?;
+    let (width, height) = before.info().size();
+    if (width, height) != after.info().size() {
+        return Some(false);
+    }
+    let a_type = before.output_color_type();
+    let b_type = after.output_color_type();
+    let same = |a: &[u8], b: &[u8]| {
+        if a_type == b_type {
+            a == b
+        } else {
+            rgba16(a, a_type).eq(rgba16(b, b_type))
+        }
+    };
+
+    // Adam7 scanlines are in pass order, not image order. Deinterlace first
+    // if either image uses Adam7; otherwise retain just a row per image.
+    if before.info().interlaced || after.info().interlaced {
+        return Some(same(&png_samples(before)?, &png_samples(after)?));
+    }
+    let mut a = vec![0; before.output_line_size(width)?];
+    let mut b = vec![0; after.output_line_size(width)?];
+    for _ in 0..height {
+        before.read_row(&mut a).ok()??;
+        after.read_row(&mut b).ok()??;
+        if !same(&a, &b) {
+            return Some(false);
+        }
+    }
+    // Read to the end of IDAT, including the Adler-32 checksum. Then check
+    // any remaining chunks through IEND.
+    if before.read_row(&mut a).ok()?.is_some() || after.read_row(&mut b).ok()?.is_some() {
+        return None;
+    }
+    before.finish().ok()?;
+    after.finish().ok()?;
+    Some(true)
 }
 
 fn png(data: &[u8], mut opts: oxipng::Options) -> Option<Vec<u8>> {
@@ -122,17 +165,7 @@ fn png(data: &[u8], mut opts: oxipng::Options) -> Option<Vec<u8>> {
     {
         return None;
     }
-    let (before, a) = png_samples(data)?;
-    let (after, b) = png_samples(&out)?;
-    if (before.width, before.height) != (after.width, after.height) {
-        return None;
-    }
-    let same = if before == after {
-        a == b
-    } else {
-        rgba16(&a, &before).eq(rgba16(&b, &after))
-    };
-    same.then_some(out)
+    same_png_samples(data, &out)?.then_some(out)
 }
 
 /// Refuse unknown APP markers and multi-picture files. A byte-for-byte marker
@@ -200,8 +233,8 @@ fn jpeg(data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// A codec error or panic must not prevent the caller from keeping the input.
-pub fn optimize(data: &[u8], png_opts: impl FnOnce() -> oxipng::Options) -> Vec<u8> {
+/// Return a smaller image, or `None` to keep the input (also on error or panic).
+pub fn optimize(data: &[u8], png_opts: impl FnOnce() -> oxipng::Options) -> Option<Vec<u8>> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if data.starts_with(PNG_SIGNATURE) {
             png(data, png_opts())
@@ -213,5 +246,105 @@ pub fn optimize(data: &[u8], png_opts: impl FnOnce() -> oxipng::Options) -> Vec<
     }))
     .ok()
     .flatten()
-    .unwrap_or_else(|| data.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn png_image(
+        kind: ColorType,
+        depth: BitDepth,
+        interlaced: bool,
+        samples: &[u8],
+        bad_adler: bool,
+    ) -> Vec<u8> {
+        let mut info = png::Info::with_size(2, 2);
+        info.color_type = kind;
+        info.bit_depth = depth;
+        info.interlaced = interlaced;
+        // The fixture supplies filtered scanlines in either image or Adam7 order.
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        zlib.write_all(samples).unwrap();
+        let mut idat = zlib.finish().unwrap();
+        if bad_adler {
+            *idat.last_mut().unwrap() ^= 1;
+        }
+        let mut bytes = Vec::new();
+        let mut writer = png::Encoder::with_info(&mut bytes, info)
+            .unwrap()
+            .write_header()
+            .unwrap();
+        writer.write_chunk(png::chunk::IDAT, &idat).unwrap();
+        writer.write_chunk(png::chunk::tEXt, b"key\0value").unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
+    #[test]
+    fn streaming_png_rejects_changes_and_bad_checksums() {
+        let make = |samples, bad_adler| {
+            png_image(
+                ColorType::Grayscale,
+                BitDepth::Eight,
+                false,
+                samples,
+                bad_adler,
+            )
+        };
+        let samples = &[0, 10, 20, 0, 30, 40];
+        let original = make(samples, false);
+        assert_eq!(same_png_samples(&original, &original), Some(true));
+        let changed = make(&[0, 10, 20, 0, 30, 41], false);
+        assert_eq!(same_png_samples(&original, &changed), Some(false));
+        assert_eq!(same_png_samples(&original, &make(samples, true)), None);
+        let mut bad_crc = original.clone();
+        let crc_end = bad_crc.len() - 12; // tEXt CRC comes right before IEND.
+        bad_crc[crc_end - 1] ^= 1;
+        assert_eq!(same_png_samples(&original, &bad_crc), None);
+    }
+
+    #[test]
+    fn streaming_png_compares_exactly_across_color_and_bit_depth_reductions() {
+        let gray = png_image(
+            ColorType::Grayscale,
+            BitDepth::Eight,
+            false,
+            &[0, 10, 20, 0, 30, 40],
+            false,
+        );
+        let mut rgb16_samples = vec![0];
+        for (i, sample) in [10, 20, 30, 40].into_iter().enumerate() {
+            if i == 2 {
+                rgb16_samples.push(0);
+            }
+            rgb16_samples.extend_from_slice(&[sample; 6]);
+        }
+        let make =
+            |samples: &[u8]| png_image(ColorType::Rgb, BitDepth::Sixteen, false, samples, false);
+        assert_eq!(same_png_samples(&gray, &make(&rgb16_samples)), Some(true));
+        rgb16_samples[1] ^= 1;
+        assert_eq!(same_png_samples(&gray, &make(&rgb16_samples)), Some(false));
+    }
+
+    #[test]
+    fn interlaced_png_compares_in_image_order() {
+        let make = |interlaced, samples| {
+            png_image(
+                ColorType::Grayscale,
+                BitDepth::Eight,
+                interlaced,
+                samples,
+                false,
+            )
+        };
+        let original = make(false, &[0, 10, 20, 0, 30, 40]);
+        // Passes 1, 6 and 7 of a 2x2 Adam7 image, in order.
+        let interlaced = make(true, &[0, 10, 0, 20, 0, 30, 40]);
+        let changed = make(true, &[0, 10, 0, 20, 0, 30, 41]);
+        assert_eq!(same_png_samples(&original, &interlaced), Some(true));
+        assert_eq!(same_png_samples(&interlaced, &original), Some(true));
+        assert_eq!(same_png_samples(&interlaced, &changed), Some(false));
+    }
 }

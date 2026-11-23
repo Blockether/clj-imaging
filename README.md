@@ -168,7 +168,8 @@ metadata. The default PNG effort is `:level 2`.
 
 Strict mode returns the input if it cannot make a smaller file that passes
 these checks. It also returns invalid input, APNG, GIF, and WebP unchanged.
-Do not combine `:strict true` with `:lossy`, `:strip true`, `:quality`,
+If the input is a byte array and the output is unchanged, strict mode returns
+the same array. Do not combine `:strict true` with `:lossy`, `:strip true`, `:quality`,
 `:format`, or `:max-*` options.
 
 Without strict mode, `optimize` can remove metadata that affects display.

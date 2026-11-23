@@ -353,10 +353,15 @@ pub fn optimize(data: &[u8], o: &Value) -> R<Vec<u8>> {
         {
             return err("optimize: option conflicts with strict mode");
         }
-        return Ok(crate::optimize_strict::optimize(data, || {
+        let smaller = crate::optimize_strict::optimize(data, || {
             let level = jf(o, "level").unwrap_or(2.0).clamp(0.0, 6.0) as u8;
             png_options(level, false)
-        }));
+        });
+        return Ok(if jb(o, "empty_if_unchanged", false) {
+            smaller.unwrap_or_default()
+        } else {
+            smaller.unwrap_or_else(|| data.to_vec())
+        });
     }
     if data.is_empty() {
         return err("optimize: empty input");
