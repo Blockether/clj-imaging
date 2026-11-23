@@ -84,6 +84,10 @@
                     :src-dirs []
                     :pom-data (pom-data (format "Prebuilt imaging-c cdylib (FFM) for %s." platform))})
       (b/copy-file {:src src :target (format "%s/prebuilds/%s/%s" native-class-dir platform fname)})
+      (b/copy-file {:src "native/vendor/tzim/LICENSE"
+                    :target (str native-class-dir "/META-INF/LICENSE-tzim")})
+      (b/copy-file {:src "native/THIRD-PARTY"
+                    :target (str native-class-dir "/META-INF/THIRD-PARTY")})
       (b/jar {:class-dir native-class-dir :jar-file jar*})
       (println "Built:" jar* "version:" version)
       jar*)))
